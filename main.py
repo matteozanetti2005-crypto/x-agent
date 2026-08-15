@@ -1,4 +1,6 @@
 import os
+import io
+import csv
 import time
 import sqlite3
 import threading
@@ -59,7 +61,7 @@ RSS_FEEDS = [
     {"source": "ArXiv AI", "url": "http://export.arxiv.org/rss/cs.AI"}
 ]
 
-X_ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan"]
+X_ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan", "BJ_Beyond"]
 NITTER_INSTANCES = [
     "https://nitter.privacydev.net",
     "https://nitter.poast.org",
@@ -121,11 +123,14 @@ def scan_feeds():
     return total_added
 
 def save_style_sample(text: str) -> int:
+    clean_text = text.strip()
+    if not clean_text:
+        return 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO style_memory (sample_text, added_at) VALUES (?, ?)",
-        (text, time.strftime("%Y-%m-%d %H:%M:%S"))
+        (clean_text, time.strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.commit()
     cursor.execute("SELECT COUNT(*) FROM style_memory")
@@ -133,15 +138,36 @@ def save_style_sample(text: str) -> int:
     conn.close()
     return count
 
+def save_bulk_samples(posts_list: list) -> int:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    added = 0
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    for p in posts_list:
+        clean = p.strip()
+        if len(clean) > 20:
+            cursor.execute("INSERT INTO style_memory (sample_text, added_at) VALUES (?, ?)", (clean, now))
+            added += 1
+    conn.commit()
+    conn.close()
+    return added
+
 def get_style_samples() -> str:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT sample_text FROM style_memory ORDER BY id DESC LIMIT 5")
+    cursor.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 6")
     rows = cursor.fetchall()
     conn.close()
     if not rows:
-        return "Nessun esempio manuale memorizzato. Usa il tono base di BJ."
-    return "\n---\n".join([f"Esempio Stile Reale:\n{r[0]}" for r in rows])
+        return "Nessun esempio memorizzato."
+    return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in rows])
+
+def clear_all_memory() -> None:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM style_memory")
+    conn.commit()
+    conn.close()
 
 def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn = sqlite3.connect(DB_NAME)
@@ -206,7 +232,7 @@ I pilastri della comunicazione di BJ:
 2. Arte e Creatività: rispetto per il processo autentico e la visione estetica.
 3. Approccio 'Building in public': trasparenza, sperimentazione pratica, no fuffa.
 
-MEMORIA DI STILE APPRESA DA BJ (Imita la cadenza, il ritmo e l'uso degli a-capo di questi esempi):
+MEMORIA DI STILE AUTENTICA DI BJ (Imita perfettamente il suo ritmo, l'uso degli elenchi, gli a-capo e il lessico di questi suoi veri post):
 {style_context}
 
 Ultime notizie e trend raccolti:
@@ -256,14 +282,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 **BJ X Agent (Adaptive Memory) è Online!**\n\n"
-        "Comandi disponibili:\n"
-        "• `/scan` : Scansiona i feed e aggiorna le fonti\n"
-        "• `/learn <testo>` : Insegna al bot un post ideale da memorizzare\n"
-        "• `/memory` : Mostra gli esempi memorizzati finora\n"
-        "• Scrivi qualsiasi tema per ricevere le bozze in **IT + EN**\n"
-        "• `/it <tema>` : Genera solo in Italiano\n"
-        "• `/en <tema>` : Genera solo in Inglese",
+        "👋 **BJ X Agent (Full Memory) è Online!**\n\n"
+        "• `/scan` : Scansiona i feed\n"
+        "• `/learn <testo>` : Memorizza un singolo post\n"
+        "• `/memory` : Mostra esempi salvati\n"
+        "• `/clear_memory` : Cancella l'archivio stile\n"
+        "• **Invia un file `.txt` o `.csv`** in chat per caricare l'intero archivio dei tuoi post!\n"
+        "• Scrivi qualsiasi tema per ricevere le bozze bilingue.",
         parse_mode="Markdown"
     )
 
@@ -271,9 +296,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
-    await update.message.reply_text("🔄 Scansione in corso sui feed AI e profili target...")
+    await update.message.reply_text("🔄 Scansione in corso...")
     added = scan_feeds()
-    await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi archiviati: {added}")
+    await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi: {added}")
 
 async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -284,14 +309,52 @@ async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Invia un testo da memorizzare. Es:\n`/learn L'AI esegue. L'essere umano firma.`", parse_mode="Markdown")
         return
     total = save_style_sample(sample_text)
-    await update.message.reply_text(f"🧠 **Stile Appreso!**\nHo memorizzato questo esempio nel database.\nEsempi totali nella memoria di stile: {total}", parse_mode="Markdown")
+    await update.message.reply_text(f"🧠 **Stile Appreso!**\nPost memorizzati: {total}", parse_mode="Markdown")
 
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
     memory = get_style_samples()
-    await update.message.reply_text(f"📚 **Memoria di Stile Attuale:**\n\n{memory}")
+    await update.message.reply_text(f"📚 **Campioni Memoria Attuale:**\n\n{memory}")
+
+async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return
+    clear_all_memory()
+    await update.message.reply_text("🧹 Memoria di stile azzerata.")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return
+    doc = update.message.document
+    file_name = doc.file_name.lower()
+    
+    if not (file_name.endswith('.txt') or file_name.endswith('.csv')):
+        await update.message.reply_text("⚠️ Invia un file in formato `.txt` o `.csv`.", parse_mode="Markdown")
+        return
+    
+    await update.message.reply_text("📥 Ricezione e analisi archivio in corso...")
+    file_obj = await doc.get_file()
+    file_bytes = await file_obj.download_as_bytearray()
+    content_str = file_bytes.decode('utf-8', errors='ignore')
+    
+    posts = []
+    if file_name.endswith('.csv'):
+        reader = csv.reader(io.StringIO(content_str))
+        for row in reader:
+            if row:
+                posts.append(row[0])
+    else:
+        if "---" in content_str:
+            posts = content_str.split("---")
+        else:
+            posts = content_str.split("\n\n")
+            
+    added = save_bulk_samples(posts)
+    await update.message.reply_text(f"🚀 **Archivio Appreso con Successo!**\nSono stati analizzati e memorizzati **{added} post** per plasmare il tuo tono di voce.", parse_mode="Markdown")
 
 async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -299,7 +362,7 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_topic = " ".join(context.args)
     if not user_topic:
-        await update.message.reply_text("⚠️ Specifica un tema. Es: `/it L'anima dell'arte nell'AI`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Specifica un tema.", parse_mode="Markdown")
         return
     await update.message.reply_text("🧠 Elaboro bozze in Italiano...")
     result = generate_ai_drafts(user_topic, lang_mode="it")
@@ -311,7 +374,7 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_topic = " ".join(context.args)
     if not user_topic:
-        await update.message.reply_text("⚠️ Specifica un tema. Es: `/en The Human Edge in AI era`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Specifica un tema.", parse_mode="Markdown")
         return
     await update.message.reply_text("🧠 Elaboro bozze in Inglese...")
     result = generate_ai_drafts(user_topic, lang_mode="en")
@@ -322,7 +385,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         return
     user_topic = update.message.text
-    await update.message.reply_text("🧠 Elaboro le bozze virali bilingue (IT + EN)...")
+    await update.message.reply_text("🧠 Elaboro le bozze virali con il tono di BJ...")
     result = generate_ai_drafts(user_topic, lang_mode="both")
     await update.message.reply_text(result)
 
@@ -342,8 +405,10 @@ async def run_bot():
     bot_app.add_handler(CommandHandler("scan", scan_cmd))
     bot_app.add_handler(CommandHandler("learn", learn_cmd))
     bot_app.add_handler(CommandHandler("memory", memory_cmd))
+    bot_app.add_handler(CommandHandler("clear_memory", clear_memory_cmd))
     bot_app.add_handler(CommandHandler("it", it_cmd))
     bot_app.add_handler(CommandHandler("en", en_cmd))
+    bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     await bot_app.initialize()
