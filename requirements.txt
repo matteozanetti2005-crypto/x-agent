@@ -3,3 +3,4 @@ python-telegram-bot
 google-genai
 python-dotenv
 apscheduler
+flask
