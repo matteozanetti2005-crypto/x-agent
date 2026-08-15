@@ -1,6 +1,5 @@
-ntscraper
-python-telegram-bot
-google-genai
-python-dotenv
-apscheduler
+python-telegram-bot>=20.0
+google-generativeai
+APScheduler
+feedparser
 flask
