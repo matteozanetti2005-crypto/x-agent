@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import sqlite3
 import threading
@@ -44,8 +43,16 @@ def init_db():
 
 init_db()
 
-# Scraper
-ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan"]
+# Feed RSS stabili + Istanze per profili X
+RSS_FEEDS = [
+    {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
+    {"source": "The Verge AI", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"},
+    {"source": "MIT Tech Review", "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
+    {"source": "Hacker News", "url": "https://hnrss.org/frontpage"},
+    {"source": "ArXiv AI", "url": "http://export.arxiv.org/rss/cs.AI"}
+]
+
+X_ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan"]
 NITTER_INSTANCES = [
     "https://nitter.privacydev.net",
     "https://nitter.poast.org",
@@ -53,35 +60,60 @@ NITTER_INSTANCES = [
 ]
 
 def scan_feeds():
-    logger.info("Scansione X...")
+    logger.info("Avvio scansione feed RSS & X...")
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    for acc in ACCOUNTS:
-        scraped = False
+    # 1. Scansione feed RSS ufficiali e stabili
+    for feed_info in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_info["url"])
+            if feed.entries:
+                for entry in feed.entries[:4]:
+                    p_id = getattr(entry, 'id', getattr(entry, 'link', ''))
+                    title = getattr(entry, 'title', '')
+                    summary = getattr(entry, 'summary', '')
+                    content = f"{title} - {summary}"[:500]
+                    pub = getattr(entry, 'published', time.ctime())
+
+                    if p_id:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
+                            (p_id, feed_info["source"], content, pub)
+                        )
+                        if cursor.rowcount > 0:
+                            total_added += 1
+        except Exception as e:
+            logger.warning(f"Errore feed {feed_info['source']}: {e}")
+            continue
+
+    # 2. Scansione profili X tramite mirror
+    for acc in X_ACCOUNTS:
         for inst in NITTER_INSTANCES:
             url = f"{inst}/{acc}/rss"
             try:
                 feed = feedparser.parse(url)
                 if feed.entries:
-                    for entry in feed.entries[:5]:
-                        p_id = getattr(entry, 'id', entry.link)
-                        content = getattr(entry, 'summary', entry.title)
+                    for entry in feed.entries[:3]:
+                        p_id = getattr(entry, 'id', getattr(entry, 'link', ''))
+                        content = getattr(entry, 'summary', getattr(entry, 'title', ''))[:400]
                         pub = getattr(entry, 'published', time.ctime())
                         
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
-                            (p_id, acc, content, pub)
-                        )
-                        if cursor.rowcount > 0:
-                            total_added += 1
-                    scraped = True
+                        if p_id:
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
+                                (p_id, f"@{acc}", content, pub)
+                            )
+                            if cursor.rowcount > 0:
+                                total_added += 1
                     break
             except Exception:
                 continue
+
     conn.commit()
     conn.close()
+    logger.info(f"Scansione completata. Nuovi elementi inseriti: {total_added}")
     return total_added
 
 def generate_ai_drafts(prompt_topic: str) -> str:
@@ -91,26 +123,32 @@ def generate_ai_drafts(prompt_topic: str) -> str:
     rows = cursor.fetchall()
     conn.close()
 
-    context_text = "\n---\n".join([f"Autore @{r[0]}: {r[1]}" for r in rows]) if rows else "Nessun dato recente."
+    context_text = "\n---\n".join([f"Fonte [{r[0]}]: {r[1]}" for r in rows]) if rows else "Nessun dato di contesto recente."
 
     full_prompt = f"""
-Sei un Ghostwriter esperto per X (Twitter).
-Unione di AI, creatività e Human Edge.
+Sei un Ghostwriter e Stratega di Contenuti per X (Twitter).
+Il tuo stile unisce innovazione tecnologica, intelligenza artificiale, e la centralità del "Human Edge" (il valore insostituibile dell'anima, del giudizio e della creatività umana).
 
-Dati recenti:
+Notizie e trend recenti dal settore:
 {context_text}
 
-Richiesta:
+Richiesta dell'utente:
 "{prompt_topic}"
 
-Genera 3 bozze pronte per X (Hook magnetico, analisi approfondita, prospettiva Human Edge).
+Genera esattamente 3 opzioni di post per X, formattate chiaramente:
+1. OPZIONE 1: Hook magnetico + intuizione concisa e diretta.
+2. OPZIONE 2: Post di analisi approfondita con ritmo serrato e scattante.
+3. OPZIONE 3: Prospettiva controintuitiva / provocazione costruttiva (Human Edge).
+
+Fornisci direttamente le opzioni pronte per il copia-incolla, senza introduzioni generiche.
 """
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(full_prompt)
         return response.text
     except Exception as e:
-        return f"⚠️ Errore Gemini: {e}"
+        logger.error(f"Errore Gemini: {e}")
+        return f"⚠️ Errore durante la generazione dei contenuti: {e}"
 
 def is_authorized(user_id) -> bool:
     if not ALLOWED_USER_ID_RAW:
@@ -121,33 +159,34 @@ def is_authorized(user_id) -> bool:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text(f"⛔ Non autorizzato. Il tuo ID è: {user_id}")
+        await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 BJ X Agent è Online!\n\n"
-        "Comandi:\n"
-        "• /scan : Scansione immediata dei post su X\n"
-        "• Scrivi qualsiasi tema per generare 3 bozze"
+        "👋 **BJ X Agent è Online!**\n\n"
+        "Comandi disponibili:\n"
+        "• `/scan` : Scansiona i feed e aggiorna il database.\n"
+        "• Invia qualsiasi testo o tema per generare 3 bozze virali per X.",
+        parse_mode="Markdown"
     )
 
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
-    await update.message.reply_text("🔄 Scansione in corso...")
+    await update.message.reply_text("🔄 Scansione in corso sui feed AI e profili target...")
     added = scan_feeds()
-    await update.message.reply_text(f"✅ Scansione terminata! Post archiviati: {added}")
+    await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi archiviati nel database: {added}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
     user_topic = update.message.text
-    await update.message.reply_text("🧠 Elaboro le bozze virali...")
+    await update.message.reply_text("🧠 Elaboro le bozze virali con Gemini...")
     result = generate_ai_drafts(user_topic)
     await update.message.reply_text(result)
 
-# Web Server Flask per Render
+# Server Flask per mantenere attivo Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -166,23 +205,19 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Bot Telegram avviato con successo!")
+    logger.info("Bot Telegram in ascolto...")
     
-    # Mantiene il loop asincrono in vita
     while True:
         await asyncio.sleep(3600)
 
 def main():
-    # 1. Avvia Flask in background
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # 2. Avvia lo Scheduler
     scheduler = BackgroundScheduler()
     scheduler.add_job(scan_feeds, 'interval', minutes=45)
     scheduler.start()
 
-    # 3. Avvia il loop asincrono nativo per Telegram
     try:
         asyncio.run(run_bot())
     except (KeyboardInterrupt, SystemExit):
