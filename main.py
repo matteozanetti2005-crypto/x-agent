@@ -38,16 +38,23 @@ def init_db():
             published_at TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS style_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sample_text TEXT,
+            added_at TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# Feed RSS stabili + Istanze per profili X
+# Feed RSS
 RSS_FEEDS = [
     {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
     {"source": "The Verge AI", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"},
-    {"source": "MIT Tech Review", "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
+    {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"},
     {"source": "Hacker News", "url": "https://hnrss.org/frontpage"},
     {"source": "ArXiv AI", "url": "http://export.arxiv.org/rss/cs.AI"}
 ]
@@ -65,7 +72,6 @@ def scan_feeds():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # 1. Scansione feed RSS
     for feed_info in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_info["url"])
@@ -87,7 +93,6 @@ def scan_feeds():
         except Exception:
             continue
 
-    # 2. Scansione mirror X
     for acc in X_ACCOUNTS:
         for inst in NITTER_INSTANCES:
             url = f"{inst}/{acc}/rss"
@@ -115,6 +120,29 @@ def scan_feeds():
     logger.info(f"Scansione completata. Nuovi elementi inseriti: {total_added}")
     return total_added
 
+def save_style_sample(text: str) -> int:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO style_memory (sample_text, added_at) VALUES (?, ?)",
+        (text, time.strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    conn.commit()
+    cursor.execute("SELECT COUNT(*) FROM style_memory")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+def get_style_samples() -> str:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sample_text FROM style_memory ORDER BY id DESC LIMIT 5")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        return "Nessun esempio manuale memorizzato. Usa il tono base di BJ."
+    return "\n---\n".join([f"Esempio Stile Reale:\n{r[0]}" for r in rows])
+
 def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -123,6 +151,7 @@ def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn.close()
 
     context_text = "\n---\n".join([f"Fonte [{r[0]}]: {r[1]}" for r in rows]) if rows else "Nessun dato di contesto recente."
+    style_context = get_style_samples()
 
     if lang_mode == "it":
         output_instruction = """
@@ -177,6 +206,9 @@ I pilastri della comunicazione di BJ:
 2. Arte e Creatività: rispetto per il processo autentico e la visione estetica.
 3. Approccio 'Building in public': trasparenza, sperimentazione pratica, no fuffa.
 
+MEMORIA DI STILE APPRESA DA BJ (Imita la cadenza, il ritmo e l'uso degli a-capo di questi esempi):
+{style_context}
+
 Ultime notizie e trend raccolti:
 {context_text}
 
@@ -224,9 +256,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 **BJ X Agent (Multilingua) è Online!**\n\n"
+        "👋 **BJ X Agent (Adaptive Memory) è Online!**\n\n"
         "Comandi disponibili:\n"
         "• `/scan` : Scansiona i feed e aggiorna le fonti\n"
+        "• `/learn <testo>` : Insegna al bot un post ideale da memorizzare\n"
+        "• `/memory` : Mostra gli esempi memorizzati finora\n"
         "• Scrivi qualsiasi tema per ricevere le bozze in **IT + EN**\n"
         "• `/it <tema>` : Genera solo in Italiano\n"
         "• `/en <tema>` : Genera solo in Inglese",
@@ -240,6 +274,24 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Scansione in corso sui feed AI e profili target...")
     added = scan_feeds()
     await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi archiviati: {added}")
+
+async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return
+    sample_text = " ".join(context.args)
+    if not sample_text:
+        await update.message.reply_text("⚠️ Invia un testo da memorizzare. Es:\n`/learn L'AI esegue. L'essere umano firma.`", parse_mode="Markdown")
+        return
+    total = save_style_sample(sample_text)
+    await update.message.reply_text(f"🧠 **Stile Appreso!**\nHo memorizzato questo esempio nel database.\nEsempi totali nella memoria di stile: {total}", parse_mode="Markdown")
+
+async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return
+    memory = get_style_samples()
+    await update.message.reply_text(f"📚 **Memoria di Stile Attuale:**\n\n{memory}")
 
 async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -288,6 +340,8 @@ async def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("scan", scan_cmd))
+    bot_app.add_handler(CommandHandler("learn", learn_cmd))
+    bot_app.add_handler(CommandHandler("memory", memory_cmd))
     bot_app.add_handler(CommandHandler("it", it_cmd))
     bot_app.add_handler(CommandHandler("en", en_cmd))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -295,7 +349,7 @@ async def run_bot():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Bot Telegram multilingua in ascolto...")
+    logger.info("Bot Telegram in ascolto...")
     
     while True:
         await asyncio.sleep(3600)
