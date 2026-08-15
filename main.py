@@ -11,7 +11,7 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Configurazione Logging
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ PORT = int(os.getenv("PORT", 8080))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Configurazione Database SQLite
+# Database
 DB_NAME = "agent_vault.db"
 
 def init_db():
@@ -43,7 +43,7 @@ def init_db():
 
 init_db()
 
-# Feed RSS ufficiali e Istanze mirror di X
+# Feed RSS stabili + Istanze per profili X
 RSS_FEEDS = [
     {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
     {"source": "The Verge AI", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"},
@@ -65,7 +65,7 @@ def scan_feeds():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # 1. Scansione Feed RSS stabili
+    # 1. Scansione feed RSS
     for feed_info in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_info["url"])
@@ -84,10 +84,10 @@ def scan_feeds():
                         )
                         if cursor.rowcount > 0:
                             total_added += 1
-        except Exception as e:
+        except Exception:
             continue
 
-    # 2. Scansione profili X tramite mirror
+    # 2. Scansione mirror X
     for acc in X_ACCOUNTS:
         for inst in NITTER_INSTANCES:
             url = f"{inst}/{acc}/rss"
@@ -146,21 +146,34 @@ Genera esattamente 3 opzioni di post per X in italiano incisivo, pronte per il c
 
 Fornisci direttamente le opzioni numerate senza alcuna frase introduttiva o conclusiva.
 """
+    try:
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        target_model = None
+        for pref in ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]:
+            for m in available_models:
+                if pref in m:
+                    target_model = m
+                    break
+            if target_model:
+                break
+        
+        if not target_model and available_models:
+            target_model = available_models[0]
+            
+        if not target_model:
+            return "⚠️ Nessun modello Gemini abilitato trovato per questa API Key."
 
-    candidate_models = ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-pro"]
-    last_error = None
-
-    for mod_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(mod_name)
-            response = model.generate_content(full_prompt)
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            last_error = e
-            continue
-
-    return f"⚠️ Errore Gemini: {last_error}"
+        logger.info(f"Modello selezionato: {target_model}")
+        model = genai.GenerativeModel(target_model)
+        response = model.generate_content(full_prompt)
+        return response.text
+    except Exception as e:
+        logger.error(f"Errore Gemini: {e}")
+        return f"⚠️ Errore Gemini: {e}"
 
 def is_authorized(user_id) -> bool:
     if not ALLOWED_USER_ID_RAW:
@@ -197,7 +210,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = generate_ai_drafts(user_topic)
     await update.message.reply_text(result)
 
-# Server Flask per mantenere attivo il container Render
+# Server Flask
 app = Flask(__name__)
 
 @app.route('/')
@@ -222,16 +235,13 @@ async def run_bot():
         await asyncio.sleep(3600)
 
 def main():
-    # Avvia Web Server Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Avvia Scheduler (scansione automatica ogni 45 min)
     scheduler = BackgroundScheduler()
     scheduler.add_job(scan_feeds, 'interval', minutes=45)
     scheduler.start()
 
-    # Avvia polling Telegram
     try:
         asyncio.run(run_bot())
     except (KeyboardInterrupt, SystemExit):
