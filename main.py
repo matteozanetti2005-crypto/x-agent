@@ -60,12 +60,12 @@ NITTER_INSTANCES = [
 ]
 
 def scan_feeds():
-    logger.info("Avvio scansione feed RSS & X...")
+    logger.info("Avvio scansione feed...")
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # 1. Scansione feed RSS ufficiali e stabili
+    # Feed RSS
     for feed_info in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_info["url"])
@@ -85,10 +85,9 @@ def scan_feeds():
                         if cursor.rowcount > 0:
                             total_added += 1
         except Exception as e:
-            logger.warning(f"Errore feed {feed_info['source']}: {e}")
             continue
 
-    # 2. Scansione profili X tramite mirror
+    # Mirror X
     for acc in X_ACCOUNTS:
         for inst in NITTER_INSTANCES:
             url = f"{inst}/{acc}/rss"
@@ -113,7 +112,6 @@ def scan_feeds():
 
     conn.commit()
     conn.close()
-    logger.info(f"Scansione completata. Nuovi elementi inseriti: {total_added}")
     return total_added
 
 def generate_ai_drafts(prompt_topic: str) -> str:
@@ -135,20 +133,28 @@ Notizie e trend recenti dal settore:
 Richiesta dell'utente:
 "{prompt_topic}"
 
-Genera esattamente 3 opzioni di post per X, formattate chiaramente:
+Genera esattamente 3 opzioni di post per X:
 1. OPZIONE 1: Hook magnetico + intuizione concisa e diretta.
-2. OPZIONE 2: Post di analisi approfondita con ritmo serrato e scattante.
+2. OPZIONE 2: Post di analisi approfondita con ritmo serrato.
 3. OPZIONE 3: Prospettiva controintuitiva / provocazione costruttiva (Human Edge).
 
-Fornisci direttamente le opzioni pronte per il copia-incolla, senza introduzioni generiche.
+Fornisci direttamente le opzioni pronte per il copia-incolla, senza frasi introduttive.
 """
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(full_prompt)
-        return response.text
-    except Exception as e:
-        logger.error(f"Errore Gemini: {e}")
-        return f"⚠️ Errore durante la generazione dei contenuti: {e}"
+    # Prova i modelli disponibili in ordine di compatibilità
+    candidate_models = ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-pro"]
+    last_error = None
+
+    for mod_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(mod_name)
+            response = model.generate_content(full_prompt)
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_error = e
+            continue
+
+    return f"⚠️ Errore Gemini: {last_error}"
 
 def is_authorized(user_id) -> bool:
     if not ALLOWED_USER_ID_RAW:
@@ -186,7 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = generate_ai_drafts(user_topic)
     await update.message.reply_text(result)
 
-# Server Flask per mantenere attivo Render
+# Server Flask
 app = Flask(__name__)
 
 @app.route('/')
