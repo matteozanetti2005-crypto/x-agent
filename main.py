@@ -1,8 +1,10 @@
 import os
+import sys
 import time
 import sqlite3
 import threading
 import logging
+import asyncio
 import feedparser
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -10,7 +12,7 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Configurazione logging
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -20,14 +22,10 @@ ALLOWED_USER_ID_RAW = os.getenv("ALLOWED_TELEGRAM_USER_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 PORT = int(os.getenv("PORT", 8080))
 
-logger.info(f"Bot Token configurato: {'SÌ' if TELEGRAM_BOT_TOKEN else 'NO'}")
-logger.info(f"ID Consentito configurato: {ALLOWED_USER_ID_RAW}")
-
-# Inizializzazione Gemini AI
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Configurazione Database SQLite
+# Database
 DB_NAME = "agent_vault.db"
 
 def init_db():
@@ -46,7 +44,7 @@ def init_db():
 
 init_db()
 
-# Feed da monitorare
+# Scraper
 ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan"]
 NITTER_INSTANCES = [
     "https://nitter.privacydev.net",
@@ -55,7 +53,7 @@ NITTER_INSTANCES = [
 ]
 
 def scan_feeds():
-    logger.info("Avvio scansione feed...")
+    logger.info("Scansione X...")
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -84,7 +82,6 @@ def scan_feeds():
                 continue
     conn.commit()
     conn.close()
-    logger.info(f"Scansione completata. Nuovi post: {total_added}")
     return total_added
 
 def generate_ai_drafts(prompt_topic: str) -> str:
@@ -106,7 +103,7 @@ Dati recenti:
 Richiesta:
 "{prompt_topic}"
 
-Genera 3 bozze di post pronte per X (Hook magnetico, analisi, e visione Human Edge).
+Genera 3 bozze pronte per X (Hook magnetico, analisi approfondita, prospettiva Human Edge).
 """
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
@@ -120,13 +117,11 @@ def is_authorized(user_id) -> bool:
         return True
     return str(user_id) == str(ALLOWED_USER_ID_RAW)
 
-# Handlers Telegram
+# Telegram Handlers
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"Ricevuto /start da ID: {user_id}")
     if not is_authorized(user_id):
-        logger.warning(f"Accesso negato per ID: {user_id}")
-        await update.message.reply_text(f"⛔ Non autorizzato. Il tuo ID Telegram è: {user_id}")
+        await update.message.reply_text(f"⛔ Non autorizzato. Il tuo ID è: {user_id}")
         return
     await update.message.reply_text(
         "👋 BJ X Agent è Online!\n\n"
@@ -148,11 +143,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         return
     user_topic = update.message.text
-    await update.message.reply_text("🧠 Genero le bozze virali...")
+    await update.message.reply_text("🧠 Elaboro le bozze virali...")
     result = generate_ai_drafts(user_topic)
     await update.message.reply_text(result)
 
-# Server Flask
+# Web Server Flask per Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -162,21 +157,36 @@ def health():
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scan_feeds, 'interval', minutes=45)
-    scheduler.start()
-
+async def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_cmd))
     bot_app.add_handler(CommandHandler("scan", scan_cmd))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+    logger.info("Bot Telegram avviato con successo!")
+    
+    # Mantiene il loop asincrono in vita
+    while True:
+        await asyncio.sleep(3600)
 
-    logger.info("Bot Telegram in ascolto...")
-    bot_app.run_polling()
+def main():
+    # 1. Avvia Flask in background
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # 2. Avvia lo Scheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(scan_feeds, 'interval', minutes=45)
+    scheduler.start()
+
+    # 3. Avvia il loop asincrono nativo per Telegram
+    try:
+        asyncio.run(run_bot())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Chiusura servizio.")
 
 if __name__ == "__main__":
     main()
