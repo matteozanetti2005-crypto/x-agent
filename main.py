@@ -146,34 +146,26 @@ Genera esattamente 3 opzioni di post per X in italiano incisivo, pronte per il c
 
 Fornisci direttamente le opzioni numerate senza alcuna frase introduttiva o conclusiva.
 """
-    try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        
-        target_model = None
-        for pref in ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]:
-            for m in available_models:
-                if pref in m:
-                    target_model = m
-                    break
-            if target_model:
-                break
-        
-        if not target_model and available_models:
-            target_model = available_models[0]
-            
-        if not target_model:
-            return "⚠️ Nessun modello Gemini abilitato trovato per questa API Key."
+    # Seleziona rigorosamente i modelli del Free Tier (Flash)
+    free_tier_models = [
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-8b"
+    ]
+    
+    last_error = None
+    for mod_name in free_tier_models:
+        try:
+            model = genai.GenerativeModel(mod_name)
+            response = model.generate_content(full_prompt)
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_error = e
+            continue
 
-        logger.info(f"Modello selezionato: {target_model}")
-        model = genai.GenerativeModel(target_model)
-        response = model.generate_content(full_prompt)
-        return response.text
-    except Exception as e:
-        logger.error(f"Errore Gemini: {e}")
-        return f"⚠️ Errore Gemini: {e}"
+    return f"⚠️ Errore Gemini: {last_error}"
 
 def is_authorized(user_id) -> bool:
     if not ALLOWED_USER_ID_RAW:
