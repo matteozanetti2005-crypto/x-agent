@@ -146,26 +146,32 @@ Genera esattamente 3 opzioni di post per X in italiano incisivo, pronte per il c
 
 Fornisci direttamente le opzioni numerate senza alcuna frase introduttiva o conclusiva.
 """
-    # Seleziona rigorosamente i modelli del Free Tier (Flash)
-    free_tier_models = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-8b"
-    ]
-    
-    last_error = None
-    for mod_name in free_tier_models:
-        try:
-            model = genai.GenerativeModel(mod_name)
-            response = model.generate_content(full_prompt)
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            last_error = e
-            continue
+    try:
+        # Recupera la lista reale dei modelli supportati dalla chiave API
+        supported_models = [
+            m.name for m in genai.list_models()
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        # Filtra preferibilmente i modelli "flash" (Free Tier)
+        flash_models = [m for m in supported_models if 'flash' in m.lower()]
+        target_models = flash_models if flash_models else supported_models
 
-    return f"⚠️ Errore Gemini: {last_error}"
+        last_error = None
+        for mod_name in target_models:
+            try:
+                model = genai.GenerativeModel(mod_name)
+                response = model.generate_content(full_prompt)
+                if response and response.text:
+                    return response.text
+            except Exception as inner_err:
+                last_error = inner_err
+                continue
+
+        return f"⚠️ Errore generazione: {last_error}"
+    except Exception as e:
+        logger.error(f"Errore Gemini API: {e}")
+        return f"⚠️ Errore Gemini API: {e}"
 
 def is_authorized(user_id) -> bool:
     if not ALLOWED_USER_ID_RAW:
