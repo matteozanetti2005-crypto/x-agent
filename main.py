@@ -11,7 +11,7 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Logging
+# Configurazione Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ PORT = int(os.getenv("PORT", 8080))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Database
+# Configurazione Database SQLite
 DB_NAME = "agent_vault.db"
 
 def init_db():
@@ -43,7 +43,7 @@ def init_db():
 
 init_db()
 
-# Feed RSS stabili + Istanze per profili X
+# Feed RSS ufficiali e Istanze mirror di X
 RSS_FEEDS = [
     {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
     {"source": "The Verge AI", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"},
@@ -60,12 +60,12 @@ NITTER_INSTANCES = [
 ]
 
 def scan_feeds():
-    logger.info("Avvio scansione feed...")
+    logger.info("Avvio scansione feed RSS & X...")
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Feed RSS
+    # 1. Scansione Feed RSS stabili
     for feed_info in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_info["url"])
@@ -87,7 +87,7 @@ def scan_feeds():
         except Exception as e:
             continue
 
-    # Mirror X
+    # 2. Scansione profili X tramite mirror
     for acc in X_ACCOUNTS:
         for inst in NITTER_INSTANCES:
             url = f"{inst}/{acc}/rss"
@@ -112,6 +112,7 @@ def scan_feeds():
 
     conn.commit()
     conn.close()
+    logger.info(f"Scansione completata. Nuovi elementi inseriti: {total_added}")
     return total_added
 
 def generate_ai_drafts(prompt_topic: str) -> str:
@@ -124,23 +125,28 @@ def generate_ai_drafts(prompt_topic: str) -> str:
     context_text = "\n---\n".join([f"Fonte [{r[0]}]: {r[1]}" for r in rows]) if rows else "Nessun dato di contesto recente."
 
     full_prompt = f"""
-Sei un Ghostwriter e Stratega di Contenuti per X (Twitter).
-Il tuo stile unisce innovazione tecnologica, intelligenza artificiale, e la centralità del "Human Edge" (il valore insostituibile dell'anima, del giudizio e della creatività umana).
+Sei il Ghostwriter e Stratega personale di BJ (@BJ_Beyond), studioso di intelligenza artificiale, autore e appassionato d'arte contemporanea.
+Scrivi post per X (Twitter) rispecchiando esattamente il suo tono di voce: autorevole, tagliente, sintetico e focalizzato sul "Human Edge" (il valore insostituibile dell'anima e della creatività umana nell'era dell'automazione).
 
-Notizie e trend recenti dal settore:
+I pilastri della comunicazione di BJ:
+1. Human Edge: l'AI amplifica ma non sostituisce l'anima, l'intuizione e il tocco umano.
+2. Arte e Creatività: rispetto per il processo autentico e la visione estetica.
+3. Approccio 'Building in public': trasparenza, sperimentazione pratica, no fuffa.
+
+Ultime notizie e trend raccolti:
 {context_text}
 
-Richiesta dell'utente:
+Tema o idea inviata da BJ:
 "{prompt_topic}"
 
-Genera esattamente 3 opzioni di post per X:
-1. OPZIONE 1: Hook magnetico + intuizione concisa e diretta.
-2. OPZIONE 2: Post di analisi approfondita con ritmo serrato.
+Genera esattamente 3 opzioni di post per X in italiano incisivo, pronte per il copia-incolla:
+1. OPZIONE 1: Hook magnetico + concetto sintetico e diretto.
+2. OPZIONE 2: Post di analisi approfondita a ritmo serrato e riflessivo.
 3. OPZIONE 3: Prospettiva controintuitiva / provocazione costruttiva (Human Edge).
 
-Fornisci direttamente le opzioni pronte per il copia-incolla, senza frasi introduttive.
+Fornisci direttamente le opzioni numerate senza alcuna frase introduttiva o conclusiva.
 """
-    # Prova i modelli disponibili in ordine di compatibilità
+
     candidate_models = ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-pro"]
     last_error = None
 
@@ -168,10 +174,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 **BJ X Agent è Online!**\n\n"
-        "Comandi disponibili:\n"
-        "• `/scan` : Scansiona i feed e aggiorna il database.\n"
-        "• Invia qualsiasi testo o tema per generare 3 bozze virali per X.",
+        "👋 **BJ X Agent è Pronto!**\n\n"
+        "• `/scan` : Esegue la scansione dei feed e aggiorna il database.\n"
+        "• Invia qualsiasi tema o idea per generare 3 bozze personalizzate per X.",
         parse_mode="Markdown"
     )
 
@@ -181,18 +186,18 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔄 Scansione in corso sui feed AI e profili target...")
     added = scan_feeds()
-    await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi archiviati nel database: {added}")
+    await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi archiviati: {added}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
     user_topic = update.message.text
-    await update.message.reply_text("🧠 Elaboro le bozze virali con Gemini...")
+    await update.message.reply_text("🧠 Elaboro le bozze virali con il tono di BJ...")
     result = generate_ai_drafts(user_topic)
     await update.message.reply_text(result)
 
-# Server Flask
+# Server Flask per mantenere attivo il container Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -217,13 +222,16 @@ async def run_bot():
         await asyncio.sleep(3600)
 
 def main():
+    # Avvia Web Server Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
+    # Avvia Scheduler (scansione automatica ogni 45 min)
     scheduler = BackgroundScheduler()
     scheduler.add_job(scan_feeds, 'interval', minutes=45)
     scheduler.start()
 
+    # Avvia polling Telegram
     try:
         asyncio.run(run_bot())
     except (KeyboardInterrupt, SystemExit):
