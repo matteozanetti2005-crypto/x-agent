@@ -1,251 +1,188 @@
 import os
-import asyncio
-import logging
+import time
 import sqlite3
 import threading
-from datetime import datetime
-from dotenv import load_dotenv
+import logging
+import feedparser
 from flask import Flask
-from ntscraper import Nitter
-from google import genai
+from apscheduler.schedulers.background import BackgroundScheduler
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# --- 1. Configurazione & Server Web Gratuito per Render ---
-load_dotenv()
+# Configurazione logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Variabili d'ambiente
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.getenv("ALLOWED_TELEGRAM_USER_ID")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PORT = int(os.getenv("PORT", 8080))
 
-ai_client = genai.Client(api_key=GEMINI_KEY)
-DB_NAME = "viral_memory.db"
+if ALLOWED_USER_ID:
+    try:
+        ALLOWED_USER_ID = int(ALLOWED_USER_ID)
+    except ValueError:
+        logger.error("ALLOWED_TELEGRAM_USER_ID non valido. Inserire solo cifre.")
 
-# Mini-server Flask per consentire a Render di mantenere il servizio attivo sul piano Free
-flask_app = Flask(__name__)
+# Inizializzazione Gemini AI
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-@flask_app.route('/')
-def health_check():
-    return "Agent is alive and running 24/7!", 200
+# Configurazione Database SQLite
+DB_NAME = "agent_vault.db"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
-
-# Argomenti monitorati su X
-SEARCH_TERMS = [
-    "AI tools",
-    "intelligenza artificiale",
-    "build in public",
-    "creator economy"
-]
-MIN_LIKES = 25
-
-# --- 2. Gestione Database SQLite ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS viral_posts (
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scraped_posts (
             id TEXT PRIMARY KEY,
-            text TEXT,
-            likes INTEGER,
-            retweets INTEGER,
-            collected_at TIMESTAMP
+            author TEXT,
+            content TEXT,
+            published_at TEXT
         )
-    """)
+    ''')
     conn.commit()
     conn.close()
 
-def save_posts(posts):
+init_db()
+
+# Feed da monitorare
+ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan"]
+NITTER_INSTANCES = [
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.woodland.cafe"
+]
+
+def scan_feeds():
+    logger.info("Avvio scansione feed su X...")
+    total_added = 0
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    saved = 0
-    for p in posts:
-        try:
-            cursor.execute("""
-                INSERT OR IGNORE INTO viral_posts (id, text, likes, retweets, collected_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (p['id'], p['text'], p['likes'], p['retweets'], datetime.now()))
-            if cursor.rowcount > 0:
-                saved += 1
-        except Exception:
-            continue
+
+    for acc in ACCOUNTS:
+        scraped = False
+        for inst in NITTER_INSTANCES:
+            url = f"{inst}/{acc}/rss"
+            try:
+                feed = feedparser.parse(url)
+                if feed.entries:
+                    for entry in feed.entries[:5]:
+                        p_id = getattr(entry, 'id', entry.link)
+                        content = getattr(entry, 'summary', entry.title)
+                        pub = getattr(entry, 'published', time.ctime())
+                        
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
+                            (p_id, acc, content, pub)
+                        )
+                        if cursor.rowcount > 0:
+                            total_added += 1
+                    scraped = True
+                    break
+            except Exception as e:
+                logger.warning(f"Errore scansione {acc} su {inst}: {e}")
+                continue
+        if not scraped:
+            logger.warning(f"Impossibile scansionare l'account @{acc} su tutte le istanze.")
+
     conn.commit()
     conn.close()
-    return saved
+    logger.info(f"Scansione completata. Nuovi post aggiunti: {total_added}")
+    return total_added
 
-def get_top_posts(limit=8):
+def generate_ai_drafts(prompt_topic: str) -> str:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT text, likes, retweets FROM viral_posts
-        ORDER BY (likes + retweets * 2) DESC, collected_at DESC
-        LIMIT ?
-    """, (limit,))
+    cursor.execute("SELECT author, content FROM scraped_posts ORDER BY ROWID DESC LIMIT 8")
     rows = cursor.fetchall()
     conn.close()
-    return [{"text": r[0], "likes": r[1], "retweets": r[2]} for r in rows]
 
-def get_post_count():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM viral_posts")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    context_text = "\n---\n".join([f"Autore @{r[0]}: {r[1]}" for r in rows]) if rows else "Nessun dato recente."
 
-# --- 3. Scraper & Monitor in Background ---
-def scan_x():
-    logging.info("Scansione in background di X in corso...")
-    scraper = Nitter(log_level=0)
-    found = []
+    full_prompt = f"""
+Sei un Ghostwriter e Stratega di Contenuti di alto livello specializzato su X (Twitter).
+La tua voce unisce intelligenza artificiale, creatività, e il concetto del "Human Edge" con uno stile autorevole, chiaro e coinvolgente.
 
-    for term in SEARCH_TERMS:
-        try:
-            results = scraper.get_tweets(term, mode='term', number=15)
-            tweets = results.get('tweets', [])
-            for t in tweets:
-                stats = t.get('stats', {})
-                likes = stats.get('likes', 0)
-                retweets = stats.get('retweets', 0)
-                text = t.get('text', '')
-                link = t.get('link', '')
+Questi sono alcuni spunti e trend catturati di recente su X:
+{context_text}
 
-                if likes >= MIN_LIKES and len(text) > 40:
-                    t_id = link.split('/')[-1] if link else str(hash(text))
-                    found.append({
-                        "id": t_id,
-                        "text": text,
-                        "likes": likes,
-                        "retweets": retweets
-                    })
-        except Exception as e:
-            logging.error(f"Errore scansione per '{term}': {e}")
-            continue
+Richiesta dell'utente:
+"{prompt_topic}"
 
-    saved = save_posts(found)
-    logging.info(f"Scansione terminata: {saved} nuovi post salvati nel DB.")
+Genera esattamente 3 opzioni di post (o thread) per X:
+1. OPZIONE 1: Hook magnetico + intuizione concisa e diretta.
+2. OPZIONE 2: Post di analisi approfondita con ritmo incalzante.
+3. OPZIONE 3: Prospettiva controintuitiva o provocazione costruttiva (Human Edge).
 
-# --- 4. Bot Telegram & Generazione AI ---
-def is_authorized(update: Update) -> bool:
-    if not ALLOWED_USER_ID:
-        return True
-    return str(update.effective_user.id) == str(ALLOWED_USER_ID)
+Fornisci direttamente le 3 opzioni pronte da pubblicare, senza convenevoli.
+"""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(full_prompt)
+        return response.text
+    except Exception as e:
+        logger.error(f"Errore Gemini: {e}")
+        return f"⚠️ Errore durante la generazione dei contenuti: {e}"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+# Handlers Telegram
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER_ID:
         return
-    msg = (
-        "🤖 **Agente Viral X Attivo (24/7 Cloud)**\n\n"
-        "Monitoro X continuamente e archivio i post ad alte prestazioni.\n\n"
-        "Comandi:\n"
-        "• `/status` - Post totali in memoria\n"
-        "• `/scan` - Forza una scansione immediata\n"
-        "• `/pattern` - Analizza i pattern e gli hook migliori\n\n"
-        "Oppure **inviami direttamente un argomento** per generare 3 bozze modellate sui trend."
+    await update.message.reply_text(
+        "👋 **BJ X Agent è Online!**\n\n"
+        "Comandi disponibili:\n"
+        "• `/scan` : Forza una scansione immediata dei post su X.\n"
+        "• Invia qualsiasi messaggio di testo per generare 3 bozze su quel tema.",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
-        return
-    count = get_post_count()
-    await update.message.reply_text(f"📊 Nel database ci sono **{count} post virali** memorizzati.")
 
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    if update.effective_user.id != ALLOWED_USER_ID:
         return
-    await update.message.reply_text("🔍 Scansione su X avviata...")
-    scan_x()
-    count = get_post_count()
-    await update.message.reply_text(f"✅ Scansione completata. Totale post nel DB: **{count}**.")
+    await update.message.reply_text("🔄 Scansione in corso sui profili target di X...")
+    added = scan_feeds()
+    await update.message.reply_text(f"✅ Scansione completata!\nNuovi post archiviati nel database: {added}")
 
-async def pattern_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER_ID:
         return
-    posts = get_top_posts(limit=8)
-    if not posts:
-        await update.message.reply_text("⚠️ Nessun dato sufficiente. Esegui prima `/scan`.")
-        return
+    user_topic = update.message.text
+    await update.message.reply_text("🧠 Analizzo i dati raccolti ed elaboro le bozze virali...")
+    result = generate_ai_drafts(user_topic)
+    await update.message.reply_text(result)
 
-    await update.message.reply_text("🧠 Studio i pattern dei post migliori in memoria...")
-    posts_text = "\n---\n".join([f"[{p['likes']} likes]\n{p['text']}" for p in posts])
-    
-    prompt = f"""
-Sei uno stratega di crescita per X.
-Analizza questi post ad alto engagement estratti dal monitoraggio:
+# Server Web Flask per mantenere attivo Render
+app = Flask(__name__)
 
-{posts_text}
+@app.route('/')
+def health_check():
+    return "Agent running", 200
 
-1. Estrai i 3 modelli di Hook (prima riga) più efficaci.
-2. Descrivi la struttura sintattica e la spaziatura.
-3. Fornisci 3 regole pratiche per massimizzare bookmark e repost.
-"""
-    res = ai_client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    await update.message.reply_text(res.text)
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
 
-async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
-        return
-    topic = update.message.text
-    posts = get_top_posts(limit=6)
-
-    if not posts:
-        await update.message.reply_text("⏳ Primo avvio: raccolgo dati da X prima di generare...")
-        scan_x()
-        posts = get_top_posts(limit=6)
-
-    await update.message.reply_text(f"✍️ Elaboro 3 bozze sul tema: *\"{topic}\"*...", parse_mode="Markdown")
-
-    context_str = "\n---\n".join([f"[{p['likes']} likes]\n{p['text']}" for p in posts]) if posts else "Nessun post di riferimento."
-    prompt = f"""
-Sei un copywriter d'élite per X.
-Ecco alcuni post performanti estratti dalla piattaforma:
-
-{context_str}
-
-TASK:
-Genera 3 post originali pronti da pubblicare su X sul seguente tema: "{topic}".
-
-Linee guida:
-- Usa le formule di hook e il ritmo visivo emersi dai post di riferimento.
-- Niente hashtag generici o cliché ovvi.
-- Struttura ottimizzata per lettura da smartphone.
-
-Formatta l'output con:
-- **Bozza 1 (Contrarian / Gancio contro-intuitivo)**
-- **Bozza 2 (Framework pratico / Elenco ad alto valore)**
-- **Bozza 3 (Storytelling / Visione diretta)**
-"""
-    res = ai_client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    await update.message.reply_text(res.text)
-
-# --- 5. Avvio Applicazione ---
 def main():
-    init_db()
+    # Avvia Flask in un thread secondario
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    # Avvia il server web Flask in un thread secondario (per Render Free Tier)
-    web_thread = threading.Thread(target=run_flask, daemon=True)
-    web_thread.start()
-
-    # Schedulatore scansione automatica ogni 45 minuti
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan_x, "interval", minutes=45)
+    # Avvia lo Scheduler in background (ogni 45 minuti)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(scan_feeds, 'interval', minutes=45)
     scheduler.start()
 
-    # Avvio Bot Telegram
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("scan", scan_cmd))
-    app.add_handler(CommandHandler("pattern", pattern_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topic))
+    # Avvia l'Agente Telegram
+    bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start_cmd))
+    bot_app.add_handler(CommandHandler("scan", scan_cmd))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logging.info("Agente e server web avviati con successo.")
-    app.run_polling()
+    logger.info("Bot avviato e in ascolto...")
+    bot_app.run_polling()
 
 if __name__ == "__main__":
     main()
