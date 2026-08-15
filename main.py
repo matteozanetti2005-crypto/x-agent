@@ -1,16 +1,18 @@
-cat << 'EOF' > main.py
 import os
 import asyncio
 import logging
 import sqlite3
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
+from flask import Flask
 from ntscraper import Nitter
 from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# --- 1. Configurazione & Server Web Gratuito per Render ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -21,6 +23,18 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = genai.Client(api_key=GEMINI_KEY)
 DB_NAME = "viral_memory.db"
 
+# Mini-server Flask per consentire a Render di mantenere il servizio attivo sul piano Free
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "Agent is alive and running 24/7!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# Argomenti monitorati su X
 SEARCH_TERMS = [
     "AI tools",
     "intelligenza artificiale",
@@ -29,6 +43,7 @@ SEARCH_TERMS = [
 ]
 MIN_LIKES = 25
 
+# --- 2. Gestione Database SQLite ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -82,6 +97,7 @@ def get_post_count():
     conn.close()
     return count
 
+# --- 3. Scraper & Monitor in Background ---
 def scan_x():
     logging.info("Scansione in background di X in corso...")
     scraper = Nitter(log_level=0)
@@ -113,6 +129,7 @@ def scan_x():
     saved = save_posts(found)
     logging.info(f"Scansione terminata: {saved} nuovi post salvati nel DB.")
 
+# --- 4. Bot Telegram & Generazione AI ---
 def is_authorized(update: Update) -> bool:
     if not ALLOWED_USER_ID:
         return True
@@ -122,13 +139,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     msg = (
-        "🤖 **Agente Viral X Attivo**\n\n"
-        "Monitoro X in background e salvo i post con metriche elevate.\n\n"
+        "🤖 **Agente Viral X Attivo (24/7 Cloud)**\n\n"
+        "Monitoro X continuamente e archivio i post ad alte prestazioni.\n\n"
         "Comandi:\n"
         "• `/status` - Post totali in memoria\n"
-        "• `/scan` - Forza una scansione ora\n"
-        "• `/pattern` - Analisi degli hook più efficaci\n\n"
-        "Oppure **inviami direttamente un tema** per generare 3 bozze di post."
+        "• `/scan` - Forza una scansione immediata\n"
+        "• `/pattern` - Analizza i pattern e gli hook migliori\n\n"
+        "Oppure **inviami direttamente un argomento** per generare 3 bozze modellate sui trend."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -141,7 +158,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
-    await update.message.reply_text("🔍 Avvio scansione istantanea su X...")
+    await update.message.reply_text("🔍 Scansione su X avviata...")
     scan_x()
     count = get_post_count()
     await update.message.reply_text(f"✅ Scansione completata. Totale post nel DB: **{count}**.")
@@ -154,18 +171,18 @@ async def pattern_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Nessun dato sufficiente. Esegui prima `/scan`.")
         return
 
-    await update.message.reply_text("🧠 Analisi pattern in corso...")
+    await update.message.reply_text("🧠 Studio i pattern dei post migliori in memoria...")
     posts_text = "\n---\n".join([f"[{p['likes']} likes]\n{p['text']}" for p in posts])
     
     prompt = f"""
 Sei uno stratega di crescita per X.
-Analizza questi post ad alto engagement:
+Analizza questi post ad alto engagement estratti dal monitoraggio:
 
 {posts_text}
 
 1. Estrai i 3 modelli di Hook (prima riga) più efficaci.
-2. Descrivi la struttura e il ritmo visivo dei testi.
-3. Fornisci 3 consigli pratici per massimizzare bookmark e repost.
+2. Descrivi la struttura sintattica e la spaziatura.
+3. Fornisci 3 regole pratiche per massimizzare bookmark e repost.
 """
     res = ai_client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
     await update.message.reply_text(res.text)
@@ -194,9 +211,9 @@ TASK:
 Genera 3 post originali pronti da pubblicare su X sul seguente tema: "{topic}".
 
 Linee guida:
-- Usa le formule di hook e il ritmo emersi dai post di riferimento.
-- Niente hashtag generici o cliché.
-- Struttura ottimizzata per lettura da mobile (spaziature, punti chiave).
+- Usa le formule di hook e il ritmo visivo emersi dai post di riferimento.
+- Niente hashtag generici o cliché ovvi.
+- Struttura ottimizzata per lettura da smartphone.
 
 Formatta l'output con:
 - **Bozza 1 (Contrarian / Gancio contro-intuitivo)**
@@ -206,13 +223,20 @@ Formatta l'output con:
     res = ai_client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
     await update.message.reply_text(res.text)
 
+# --- 5. Avvio Applicazione ---
 def main():
     init_db()
 
+    # Avvia il server web Flask in un thread secondario (per Render Free Tier)
+    web_thread = threading.Thread(target=run_flask, daemon=True)
+    web_thread.start()
+
+    # Schedulatore scansione automatica ogni 45 minuti
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scan_x, "interval", minutes=45)
     scheduler.start()
 
+    # Avvio Bot Telegram
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))
@@ -220,9 +244,8 @@ def main():
     app.add_handler(CommandHandler("pattern", pattern_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topic))
 
-    logging.info("Agente avviato con successo.")
+    logging.info("Agente e server web avviati con successo.")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-EOF
