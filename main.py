@@ -61,16 +61,12 @@ RSS_FEEDS = [
     {"source": "ArXiv AI", "url": "http://export.arxiv.org/rss/cs.AI"}
 ]
 
-X_ACCOUNTS = ["sama", "karpathy", "ylecun", "paulg", "drjimfan", "BJ_Beyond"]
-NITTER_INSTANCES = [
-    "https://nitter.privacydev.net",
-    "https://nitter.poast.org",
-    "https://nitter.woodland.cafe"
-]
-
-def scan_feeds():
-    logger.info("Avvio scansione feed RSS & X...")
+# Funzione di scansione e notifica proattiva
+async def scan_and_notify_feeds(bot_application):
+    logger.info("Avvio scansione feed RSS (Proattiva)...")
     total_added = 0
+    new_items_for_analysis = []
+    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
@@ -78,7 +74,7 @@ def scan_feeds():
         try:
             feed = feedparser.parse(feed_info["url"])
             if feed.entries:
-                for entry in feed.entries[:4]:
+                for entry in feed.entries[:2]:
                     p_id = getattr(entry, 'id', getattr(entry, 'link', ''))
                     title = getattr(entry, 'title', '')
                     summary = getattr(entry, 'summary', '')
@@ -92,35 +88,45 @@ def scan_feeds():
                         )
                         if cursor.rowcount > 0:
                             total_added += 1
+                            new_items_for_analysis.append(content)
         except Exception:
             continue
 
-    for acc in X_ACCOUNTS:
-        for inst in NITTER_INSTANCES:
-            url = f"{inst}/{acc}/rss"
-            try:
-                feed = feedparser.parse(url)
-                if feed.entries:
-                    for entry in feed.entries[:3]:
-                        p_id = getattr(entry, 'id', getattr(entry, 'link', ''))
-                        content = getattr(entry, 'summary', getattr(entry, 'title', ''))[:400]
-                        pub = getattr(entry, 'published', time.ctime())
-                        
-                        if p_id:
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
-                                (p_id, f"@{acc}", content, pub)
-                            )
-                            if cursor.rowcount > 0:
-                                total_added += 1
-                    break
-            except Exception:
-                continue
-
     conn.commit()
     conn.close()
+    
     logger.info(f"Scansione completata. Nuovi elementi inseriti: {total_added}")
+
+    if total_added > 0 and ALLOWED_USER_ID_RAW and GEMINI_API_KEY:
+        await evaluate_and_poke_user(bot_application, new_items_for_analysis)
+
     return total_added
+
+async def evaluate_and_poke_user(bot_application, new_items):
+    joined_news = "\n---\n".join(new_items[:5])
+    style_context = get_style_samples()
+
+    prompt = f"""
+Analizza queste nuove notizie appena catturate dai feed:
+{joined_news}
+
+Sei il ghostwriter e stratega di BJ (@BJ_Beyond). Scegli la notizia più rilevante che tocca il "Human Edge", l'arte o l'innovazione tecnologica. 
+Se c'è una notizia davvero stimolante, scrivi un breve messaggio proattivo (massimo 3 frasi) in cui mi avvisi della scoperta e abbozza un'idea di post tagliente in stile BJ.
+Se nessuna notizia è abbastanza forte, rispondi ESATTAMENTE con la parola: SKIP.
+"""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        text_out = response.text.strip()
+        
+        if "skip" not in text_out.lower() and len(text_out) > 10:
+            await bot_application.bot.send_message(
+                chat_id=ALLOWED_USER_ID_RAW,
+                text=f"🚨 **Phoenix Alert (Proattivo)**\n\n{text_out}",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Errore durante l'analisi proattiva: {e}")
 
 def save_style_sample(text: str) -> int:
     clean_text = text.strip()
@@ -198,29 +204,16 @@ Generate 3 options for X strictly in ENGLISH (natural, impactful, no fluff):
 Genera 3 opzioni per X fornendo per ciascuna SIA la versione ITALIANA che la traduzione fluida in INGLESE:
 
 **OPZIONE 1 / OPTION 1**
-🇮🇹 IT:
-[Testo italiano - Hook magnetico]
-
-🇬🇧 EN:
-[English translation]
-
+🇮🇹 IT: [Testo italiano - Hook magnetico]
+🇬🇧 EN: [English translation]
 ***
-
 **OPZIONE 2 / OPTION 2**
-🇮🇹 IT:
-[Testo italiano - Analisi approfondita]
-
-🇬🇧 EN:
-[English translation]
-
+🇮🇹 IT: [Testo italiano - Analisi approfondita]
+🇬🇧 EN: [English translation]
 ***
-
 **OPZIONE 3 / OPTION 3 (Human Edge)**
-🇮🇹 IT:
-[Testo italiano - Angolo controintuitivo]
-
-🇬🇧 EN:
-[English translation]
+🇮🇹 IT: [Testo italiano - Angolo controintuitivo]
+🇬🇧 EN: [English translation]
 """
 
     full_prompt = f"""
@@ -232,7 +225,7 @@ I pilastri della comunicazione di BJ:
 2. Arte e Creatività: rispetto per il processo autentico e la visione estetica.
 3. Approccio 'Building in public': trasparenza, sperimentazione pratica, no fuffa.
 
-MEMORIA DI STILE AUTENTICA DI BJ (Imita perfettamente il suo ritmo, l'uso degli elenchi, gli a-capo e il lessico di questi suoi veri post):
+MEMORIA DI STILE AUTENTICA DI BJ:
 {style_context}
 
 Ultime notizie e trend raccolti:
@@ -250,7 +243,6 @@ Fornisci direttamente l'output pronto per il copia-incolla, senza frasi introdut
             m.name for m in genai.list_models()
             if 'generateContent' in m.supported_generation_methods
         ]
-        
         flash_models = [m for m in supported_models if 'flash' in m.lower()]
         target_models = flash_models if flash_models else supported_models
 
@@ -282,14 +274,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 **BJ X Agent (Brainstorm & Memory) è Online!**\n\n"
-        "• `/scan` : Scansiona i feed\n"
+        "👋 **BJ X Agent (Proattivo & Brainstorm) è Online!**\n\n"
+        "• `/scan` : Scansiona i feed manualmente\n"
         "• `/learn <testo>` : Memorizza un singolo post\n"
         "• `/memory` : Mostra esempi salvati\n"
         "• `/clear_memory` : Cancella l'archivio stile\n"
-        "• **Invia un file `.txt` o `.csv`** per caricare l'intero archivio dei tuoi post!\n\n"
-        "💡 **Modalità d'uso:**\n"
-        "Scrivimi le tue idee. Chiacchieriamo e facciamo brainstorming. Quando sei pronto a trasformare l'idea in realtà, scrivi **'Genera i post'** e io creerò le bozze bilingue.",
+        "• **Invia un file `.txt` o `.csv`** per caricare l'archivio dei tuoi post!\n\n"
+        "💡 **Uso:** Chiacchieriamo e facciamo brainstorming. Scrivi **'Genera i post'** per avere le bozze bilingue.",
         parse_mode="Markdown"
     )
 
@@ -298,8 +289,35 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         return
     await update.message.reply_text("🔄 Scansione in corso...")
-    added = scan_feeds()
+    added = scan_feeds_manual()
     await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi: {added}")
+
+def scan_feeds_manual():
+    total_added = 0
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    for feed_info in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_info["url"])
+            if feed.entries:
+                for entry in feed.entries[:3]:
+                    p_id = getattr(entry, 'id', getattr(entry, 'link', ''))
+                    title = getattr(entry, 'title', '')
+                    summary = getattr(entry, 'summary', '')
+                    content = f"{title} - {summary}"[:500]
+                    pub = getattr(entry, 'published', time.ctime())
+                    if p_id:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO scraped_posts (id, author, content, published_at) VALUES (?, ?, ?, ?)",
+                            (p_id, feed_info["source"], content, pub)
+                        )
+                        if cursor.rowcount > 0:
+                            total_added += 1
+        except Exception:
+            continue
+    conn.commit()
+    conn.close()
+    return total_added
 
 async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -307,10 +325,10 @@ async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sample_text = " ".join(context.args)
     if not sample_text:
-        await update.message.reply_text("⚠️ Invia un testo da memorizzare. Es:\n`/learn L'AI esegue. L'essere umano firma.`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Invia un testo da memorizzare.", parse_mode="Markdown")
         return
     total = save_style_sample(sample_text)
-    await update.message.reply_text(f"🧠 **Stile Appreso!**\nPost memorizzati: {total}", parse_mode="Markdown")
+    await update.message.reply_text(f"🧠 **Stile Appreso!** Post memorizzati: {total}", parse_mode="Markdown")
 
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -355,7 +373,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             posts = content_str.split("\n\n")
             
     added = save_bulk_samples(posts)
-    await update.message.reply_text(f"🚀 **Archivio Appreso con Successo!**\nSono stati analizzati e memorizzati **{added} post** per plasmare il tuo tono di voce.", parse_mode="Markdown")
+    await update.message.reply_text(f"🚀 **Archivio Appreso con Successo!** Memorizzati **{added} post**.", parse_mode="Markdown")
 
 async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -381,7 +399,6 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = generate_ai_drafts(user_topic, lang_mode="en")
     await update.message.reply_text(result)
 
-# Memoria temporanea per il brainstorming
 user_conversations = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -391,32 +408,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     user_text = update.message.text
     
-    # 1. Se l'utente scrive la frase "magica" per generare
     if "genera i post" in user_text.lower() or "genera post" in user_text.lower():
-        await update.message.reply_text("🚀 Ottimo. Assemblo le bozze bilingue definitive basate sulle nostre idee...")
-        
-        # Prende il succo della conversazione come tema per il post
+        await update.message.reply_text("🚀 Assemblo le bozze bilingue definitive...")
         chat_context = user_conversations.get(user_id, "Nessuna conversazione precedente. Tema libero.")
-        tema_esteso = f"Basati su questa conversazione di brainstorming per scrivere i post:\n{chat_context}"
+        tema_esteso = f"Basati su questa conversazione di brainstorming:\n{chat_context}"
         
         result = generate_ai_drafts(tema_esteso, lang_mode="both")
         await update.message.reply_text(result)
-        
-        # Svuota la memoria della chat per la prossima idea
         user_conversations[user_id] = ""
         return
 
-    # 2. Altrimenti, entra in modalità "Brainstorming"
     history = user_conversations.get(user_id, "")
-    
     brainstorm_prompt = f"""
     Sei il ghostwriter e stratega di BJ (@BJ_Beyond). 
-    Siamo in fase di BRAINSTORMING. Non devi scrivere il post definitivo, ma devi chiacchierare con me.
-    Rispondi alle mie idee, dammi spunti sul "Human Edge", AI o arte, e aiutami a mettere a fuoco il concetto.
+    Siamo in fase di BRAINSTORMING. Rispondi alle mie idee, dammi spunti sul "Human Edge", AI o arte.
     Rispondi in modo discorsivo, intelligente, tagliente e BREVE (massimo 2-3 frasi).
-    Se vedi che l'idea è matura, ricordami che posso scrivere "Genera i post" per avere le bozze finali formattate.
+    Se l'idea è matura, ricordami che posso scrivere "Genera i post".
     
-    Storico della nostra chiacchierata:
+    Storico:
     {history}
     
     BJ ti dice: "{user_text}"
@@ -424,36 +433,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
         reply = None
         last_err = None
-        
-        # Prova tutti i modelli in lista finché uno non risponde correttamente
         for mod_name in valid_models:
             try:
                 model = genai.GenerativeModel(mod_name)
                 response = model.generate_content(brainstorm_prompt)
                 if response and response.text:
                     reply = response.text
-                    break  # Trovato! Esce dal loop
+                    break
             except Exception as inner_e:
                 last_err = inner_e
-                continue # Fallito, passa al modello successivo
+                continue
                 
         if not reply:
-            await update.message.reply_text(f"⚠️ Nessun modello disponibile ha funzionato. Ultimo errore: {last_err}")
+            await update.message.reply_text(f"⚠️ Errore modello: {last_err}")
             return
             
-        # Salva la chiacchierata in memoria (teniamo solo l'ultima parte per non appesantire)
         new_history = history + f"\nBJ: {user_text}\nAI: {reply}\n"
         user_conversations[user_id] = new_history[-2000:]
-        
         await update.message.reply_text(reply)
-        
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Errore critico di brainstorming: {e}")
+        await update.message.reply_text(f"⚠️ Errore critico: {e}")
 
-# Server Flask
+# Server Flask per Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -475,10 +478,19 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # Scheduler collegato al bot per la proattività
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        lambda: asyncio.run_coroutine_threadsafe(scan_and_notify_feeds(bot_app), asyncio.get_event_loop()),
+        'interval', 
+        minutes=45
+    )
+    scheduler.start()
+
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    logger.info("Bot Telegram in ascolto...")
+    logger.info("Bot Telegram in ascolto con proattività attiva...")
     
     while True:
         await asyncio.sleep(3600)
@@ -486,10 +498,6 @@ async def run_bot():
 def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scan_feeds, 'interval', minutes=45)
-    scheduler.start()
 
     try:
         asyncio.run(run_bot())
