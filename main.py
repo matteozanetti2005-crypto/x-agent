@@ -423,8 +423,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     try:
-        # Usa il modello AI per chattare (gemini-pro supportato ovunque)
-        model = genai.GenerativeModel('gemini-pro')
+        # Cerca dinamicamente il modello corretto disponibile
+        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        best_model = next((m for m in valid_models if 'flash' in m.lower()), valid_models[0]) if valid_models else "models/gemini-1.5-flash"
+        
+        model = genai.GenerativeModel(best_model)
         response = model.generate_content(brainstorm_prompt)
         reply = response.text
         
