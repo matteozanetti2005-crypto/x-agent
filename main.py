@@ -423,8 +423,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     try:
-        # Usa il modello AI per chattare
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Usa il modello AI per chattare (gemini-pro supportato ovunque)
+        model = genai.GenerativeModel('gemini-pro')
         response = model.generate_content(brainstorm_prompt)
         reply = response.text
         
