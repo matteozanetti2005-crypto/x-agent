@@ -423,14 +423,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     try:
-        # Cerca dinamicamente il modello corretto disponibile
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        best_model = next((m for m in valid_models if 'flash' in m.lower()), valid_models[0]) if valid_models else "models/gemini-1.5-flash"
         
-        model = genai.GenerativeModel(best_model)
-        response = model.generate_content(brainstorm_prompt)
-        reply = response.text
+        reply = None
+        last_err = None
         
+        # Prova tutti i modelli in lista finché uno non risponde correttamente
+        for mod_name in valid_models:
+            try:
+                model = genai.GenerativeModel(mod_name)
+                response = model.generate_content(brainstorm_prompt)
+                if response and response.text:
+                    reply = response.text
+                    break  # Trovato! Esce dal loop
+            except Exception as inner_e:
+                last_err = inner_e
+                continue # Fallito, passa al modello successivo
+                
+        if not reply:
+            await update.message.reply_text(f"⚠️ Nessun modello disponibile ha funzionato. Ultimo errore: {last_err}")
+            return
+            
         # Salva la chiacchierata in memoria (teniamo solo l'ultima parte per non appesantire)
         new_history = history + f"\nBJ: {user_text}\nAI: {reply}\n"
         user_conversations[user_id] = new_history[-2000:]
@@ -438,7 +451,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Errore di brainstorming: {e}")
+        await update.message.reply_text(f"⚠️ Errore critico di brainstorming: {e}")
 
 # Server Flask
 app = Flask(__name__)
