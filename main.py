@@ -282,13 +282,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Non autorizzato. ID: {user_id}")
         return
     await update.message.reply_text(
-        "👋 **BJ X Agent (Full Memory) è Online!**\n\n"
+        "👋 **BJ X Agent (Brainstorm & Memory) è Online!**\n\n"
         "• `/scan` : Scansiona i feed\n"
         "• `/learn <testo>` : Memorizza un singolo post\n"
         "• `/memory` : Mostra esempi salvati\n"
         "• `/clear_memory` : Cancella l'archivio stile\n"
-        "• **Invia un file `.txt` o `.csv`** in chat per caricare l'intero archivio dei tuoi post!\n"
-        "• Scrivi qualsiasi tema per ricevere le bozze bilingue.",
+        "• **Invia un file `.txt` o `.csv`** per caricare l'intero archivio dei tuoi post!\n\n"
+        "💡 **Modalità d'uso:**\n"
+        "Scrivimi le tue idee. Chiacchieriamo e facciamo brainstorming. Quando sei pronto a trasformare l'idea in realtà, scrivi **'Genera i post'** e io creerò le bozze bilingue.",
         parse_mode="Markdown"
     )
 
@@ -380,14 +381,61 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = generate_ai_drafts(user_topic, lang_mode="en")
     await update.message.reply_text(result)
 
+# Memoria temporanea per il brainstorming
+user_conversations = {}
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
-    user_topic = update.message.text
-    await update.message.reply_text("🧠 Elaboro le bozze virali con il tono di BJ...")
-    result = generate_ai_drafts(user_topic, lang_mode="both")
-    await update.message.reply_text(result)
+        
+    user_text = update.message.text
+    
+    # 1. Se l'utente scrive la frase "magica" per generare
+    if "genera i post" in user_text.lower() or "genera post" in user_text.lower():
+        await update.message.reply_text("🚀 Ottimo. Assemblo le bozze bilingue definitive basate sulle nostre idee...")
+        
+        # Prende il succo della conversazione come tema per il post
+        chat_context = user_conversations.get(user_id, "Nessuna conversazione precedente. Tema libero.")
+        tema_esteso = f"Basati su questa conversazione di brainstorming per scrivere i post:\n{chat_context}"
+        
+        result = generate_ai_drafts(tema_esteso, lang_mode="both")
+        await update.message.reply_text(result)
+        
+        # Svuota la memoria della chat per la prossima idea
+        user_conversations[user_id] = ""
+        return
+
+    # 2. Altrimenti, entra in modalità "Brainstorming"
+    history = user_conversations.get(user_id, "")
+    
+    brainstorm_prompt = f"""
+    Sei il ghostwriter e stratega di BJ (@BJ_Beyond). 
+    Siamo in fase di BRAINSTORMING. Non devi scrivere il post definitivo, ma devi chiacchierare con me.
+    Rispondi alle mie idee, dammi spunti sul "Human Edge", AI o arte, e aiutami a mettere a fuoco il concetto.
+    Rispondi in modo discorsivo, intelligente, tagliente e BREVE (massimo 2-3 frasi).
+    Se vedi che l'idea è matura, ricordami che posso scrivere "Genera i post" per avere le bozze finali formattate.
+    
+    Storico della nostra chiacchierata:
+    {history}
+    
+    BJ ti dice: "{user_text}"
+    """
+    
+    try:
+        # Usa il modello AI per chattare
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(brainstorm_prompt)
+        reply = response.text
+        
+        # Salva la chiacchierata in memoria (teniamo solo l'ultima parte per non appesantire)
+        new_history = history + f"\nBJ: {user_text}\nAI: {reply}\n"
+        user_conversations[user_id] = new_history[-2000:]
+        
+        await update.message.reply_text(reply)
+        
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Errore di brainstorming: {e}")
 
 # Server Flask
 app = Flask(__name__)
