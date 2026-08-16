@@ -52,13 +52,11 @@ def init_db():
 
 init_db()
 
-# Feed RSS
+# Feed RSS (Aggiornato con il tuo feed personalizzato RSS.app e fonti pulite)
 RSS_FEEDS = [
+    {"source": "Feed Personalizzato BJ", "url": "https://rss.app/feeds/t5ooMu9TaY8RO77f.xml"},
     {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
-    {"source": "The Verge AI", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"},
-    {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"},
-    {"source": "Hacker News", "url": "https://hnrss.org/frontpage"},
-    {"source": "ArXiv AI", "url": "http://export.arxiv.org/rss/cs.AI"}
+    {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"}
 ]
 
 # Funzione di scansione e notifica proattiva
