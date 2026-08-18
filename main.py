@@ -9,8 +9,11 @@ import feedparser
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 import google.generativeai as genai
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
+)
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -32,7 +35,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    # Esempi di stile con score
     c.execute('''
         CREATE TABLE IF NOT EXISTS style_memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,11 +42,11 @@ def init_db():
             score REAL DEFAULT 1.0,
             times_used INTEGER DEFAULT 0,
             last_used TEXT,
-            added_at TEXT
+            added_at TEXT,
+            source TEXT DEFAULT 'manual'
         )
     ''')
 
-    # Preferenze strutturali (regole di stile)
     c.execute('''
         CREATE TABLE IF NOT EXISTS preferences (
             key TEXT PRIMARY KEY,
@@ -53,7 +55,6 @@ def init_db():
         )
     ''')
 
-    # Memoria di conversazione
     c.execute('''
         CREATE TABLE IF NOT EXISTS conversation_memory (
             user_id TEXT PRIMARY KEY,
@@ -62,7 +63,6 @@ def init_db():
         )
     ''')
 
-    # Post scrapati
     c.execute('''
         CREATE TABLE IF NOT EXISTS scraped_posts (
             id TEXT PRIMARY KEY,
@@ -72,7 +72,6 @@ def init_db():
         )
     ''')
 
-    # System prompt dinamico
     c.execute('''
         CREATE TABLE IF NOT EXISTS system_prompt (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -81,7 +80,15 @@ def init_db():
         )
     ''')
 
-    # Inizializza preferenze di default se non esistono
+    # Tabella temporanea per i draft generati (per feedback)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS generated_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            created_at TEXT
+        )
+    ''')
+
     defaults = {
         "tone": "naturale, tagliente, umano, Human Edge",
         "max_length": "brevi (max 280-320 caratteri se possibile)",
@@ -93,7 +100,6 @@ def init_db():
         c.execute("INSERT OR IGNORE INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
                   (k, v, time.strftime("%Y-%m-%d %H:%M:%S")))
 
-    # System prompt di base
     base_prompt = """Sei il ghostwriter ufficiale di BJ.
 Tono: naturale, tagliente, umano. Human Edge.
 Non suonare mai come un AI generico.
@@ -145,13 +151,13 @@ def get_all_preferences() -> dict:
     return {r[0]: r[1] for r in rows}
 
 # ====================== STYLE MEMORY ======================
-def save_style_sample(text: str, initial_score: float = 1.0) -> int:
+def save_style_sample(text: str, initial_score: float = 1.0, source: str = "manual") -> int:
     if len(text.strip()) < 15:
         return 0
     conn = sqlite3.connect(DB_NAME)
     conn.execute(
-        "INSERT INTO style_memory (sample_text, score, added_at) VALUES (?, ?, ?)",
-        (text.strip(), initial_score, time.strftime("%Y-%m-%d %H:%M:%S"))
+        "INSERT INTO style_memory (sample_text, score, added_at, source) VALUES (?, ?, ?, ?)",
+        (text.strip(), initial_score, time.strftime("%Y-%m-%d %H:%M:%S"), source)
     )
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM style_memory").fetchone()[0]
@@ -161,7 +167,7 @@ def save_style_sample(text: str, initial_score: float = 1.0) -> int:
 def update_style_score(sample_id: int, delta: float):
     conn = sqlite3.connect(DB_NAME)
     conn.execute(
-        "UPDATE style_memory SET score = score + ?, times_used = times_used + 1, last_used = ? WHERE id = ?",
+        "UPDATE style_memory SET score = MAX(0.1, score + ?), times_used = times_used + 1, last_used = ? WHERE id = ?",
         (delta, time.strftime("%Y-%m-%d %H:%M:%S"), sample_id)
     )
     conn.commit()
@@ -187,7 +193,6 @@ def get_best_style_samples(topic: str = None, limit: int = 6) -> str:
     if not rows:
         return "Nessun esempio di stile di alta qualità disponibile."
 
-    # Aggiorna times_used
     conn = sqlite3.connect(DB_NAME)
     for r in rows:
         conn.execute("UPDATE style_memory SET times_used = times_used + 1, last_used = ? WHERE id = ?",
@@ -196,6 +201,24 @@ def get_best_style_samples(topic: str = None, limit: int = 6) -> str:
     conn.close()
 
     return "\n---\n".join([f"[Score {r[2]:.1f}] {r[1]}" for r in rows])
+
+# ====================== GENERATED DRAFTS (per feedback) ======================
+def save_generated_draft(text: str) -> int:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.execute(
+        "INSERT INTO generated_drafts (text, created_at) VALUES (?, ?)",
+        (text.strip(), time.strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    draft_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return draft_id
+
+def get_generated_draft(draft_id: int) -> str | None:
+    conn = sqlite3.connect(DB_NAME)
+    row = conn.execute("SELECT text FROM generated_drafts WHERE id = ?", (draft_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
 
 # ====================== SYSTEM PROMPT ======================
 def get_system_prompt() -> str:
@@ -214,19 +237,18 @@ def update_system_prompt(new_prompt: str):
     conn.close()
 
 def evolve_system_prompt():
-    """Fa evolvere il system prompt basandosi sulle preferenze e sugli esempi migliori"""
     prefs = get_all_preferences()
-    best_samples = get_best_style_samples(limit=4)
+    best_samples = get_best_style_samples(limit=5)
 
     prompt = f"""Sei un meta-agente che migliora il system prompt di un ghostwriter.
-Analizza le preferenze attuali e gli esempi di stile migliori.
-Riscrivi un system prompt più preciso, potente e fedele allo stile di BJ.
-Rispondi SOLO con il nuovo system prompt, nient'altro.
+Analizza le preferenze e gli esempi di stile migliori.
+Riscrivi un system prompt più preciso e fedele allo stile di BJ.
+Rispondi SOLO con il nuovo system prompt.
 
-Preferenze attuali:
+Preferenze:
 {json.dumps(prefs, indent=2, ensure_ascii=False)}
 
-Esempi di stile migliori:
+Esempi migliori:
 {best_samples}
 """
     try:
@@ -236,7 +258,7 @@ Esempi di stile migliori:
             update_system_prompt(new_prompt)
             return True
     except Exception as e:
-        logger.error(f"Errore evolve_system_prompt: {e}")
+        logger.error(f"Errore evolve: {e}")
     return False
 
 # ====================== CONVERSATION ======================
@@ -255,90 +277,73 @@ def load_conversation(user_id) -> str:
     conn.close()
     return row[0] if row else ""
 
-# ====================== GENERAZIONE ======================
-def generate_ai_drafts(topic: str) -> str:
+# ====================== GENERAZIONE CON FEEDBACK ======================
+def generate_ai_drafts(topic: str) -> tuple[str, list]:
+    """Ritorna (testo formattato, lista di draft_id)"""
     style = get_best_style_samples(topic)
     prefs = get_all_preferences()
     system = get_system_prompt()
 
     prompt = f"""{system}
 
-PREFERENZE ATTUALI:
+PREFERENZE:
 {json.dumps(prefs, indent=2, ensure_ascii=False)}
 
 ESEMPI DI STILE DI ALTA QUALITÀ:
 {style}
 
-TEMA RICHIESTO: {topic}
+TEMA: {topic}
 
-Genera 3 opzioni di post. 
-Devono essere potenti, fedeli allo stile e rispettare le preferenze.
-Numerale 1. 2. 3.
+Genera esattamente 3 opzioni di post.
+Ogni opzione deve essere potente e fedele allo stile.
+Formato obbligatorio:
+1. <testo>
+2. <testo>
+3. <testo>
 """
     try:
         model = get_model()
-        return model.generate_content(prompt).text.strip()
+        raw = model.generate_content(prompt).text.strip()
     except Exception as e:
-        logger.error(f"Errore generate: {e}")
-        return f"Errore generazione: {e}"
+        return f"Errore generazione: {e}", []
 
-# ====================== FEEDBACK ======================
-def apply_feedback(text: str, is_good: bool):
-    """Cerca il testo più simile e aggiorna lo score"""
-    conn = sqlite3.connect(DB_NAME)
-    rows = conn.execute("SELECT id, sample_text FROM style_memory").fetchall()
-    conn.close()
+    # Parsing grezzo delle 3 opzioni
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
+    options = []
+    current = []
+    for line in lines:
+        if line.startswith(("1.", "2.", "3.")):
+            if current:
+                options.append(" ".join(current).strip())
+            current = [line[2:].strip()]
+        else:
+            current.append(line)
+    if current:
+        options.append(" ".join(current).strip())
 
-    best_id = None
-    best_score = 0
-    text_lower = text.lower()
+    options = options[:3]
+    if not options:
+        options = [raw]
 
-    for rid, sample in rows:
-        # matching grezzo ma efficace
-        common = len(set(text_lower.split()) & set(sample.lower().split()))
-        if common > best_score:
-            best_score = common
-            best_id = rid
+    draft_ids = []
+    formatted = []
+    for i, opt in enumerate(options, 1):
+        draft_id = save_generated_draft(opt)
+        draft_ids.append(draft_id)
+        formatted.append(f"**{i}.** {opt}")
 
-    if best_id:
-        delta = 0.35 if is_good else -0.45
-        update_style_score(best_id, delta)
-        return True
-    return False
+    return "\n\n".join(formatted), draft_ids
 
-# ====================== RSS (invariato) ======================
-RSS_FEEDS = [
-    {"source": "Feed Personalizzato BJ", "url": "https://rss.app/feeds/t5ooMu9TaY8RO77f.xml"},
-    {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
-    {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"},
-]
-
-def scan_feeds_manual() -> int:
-    total = 0
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    for f in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(f["url"])
-            for entry in feed.entries[:3]:
-                pid = getattr(entry, "id", getattr(entry, "link", None))
-                if not pid:
-                    continue
-                content = f"{getattr(entry, 'title', '')} - {getattr(entry, 'summary', '')}"[:500]
-                c.execute("INSERT OR IGNORE INTO scraped_posts VALUES (?,?,?,?)",
-                          (pid, f["source"], content, getattr(entry, "published", time.ctime())))
-                if c.rowcount > 0:
-                    total += 1
-        except Exception as e:
-            logger.warning(f"Errore feed: {e}")
-    conn.commit()
-    conn.close()
-    return total
-
-async def scan_and_notify_feeds(bot_application):
-    # (stesso codice di prima, semplificato)
-    total_added = scan_feeds_manual()
-    return total_added
+def build_feedback_keyboard(draft_ids: list) -> InlineKeyboardMarkup:
+    buttons = []
+    for i, did in enumerate(draft_ids, 1):
+        row = [
+            InlineKeyboardButton(f"👍 {i}", callback_data=f"up:{did}"),
+            InlineKeyboardButton(f"👎 {i}", callback_data=f"down:{did}"),
+            InlineKeyboardButton(f"💾 {i}", callback_data=f"save:{did}"),
+        ]
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
 
 # ====================== HANDLERS ======================
 def is_authorized(uid) -> bool:
@@ -350,16 +355,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     await update.message.reply_text(
-        "👋 *BJ Agent v2 Evolutivo* online.\n\n"
-        "Comandi principali:\n"
-        "/learn <testo> → impara stile\n"
-        "/buono <testo> → rinforza\n"
-        "/scarta <testo> → penalizza\n"
+        "👋 *BJ Agent v2.1 Evolutivo*\n\n"
+        "Comandi:\n"
+        "/learn <testo>\n"
+        "/buono /scarta (ancora disponibili)\n"
         "/preferenza <chiave> <valore>\n"
-        "/evolve → fa evolvere il system prompt\n"
-        "/memory → mostra memoria stile\n"
-        "/prefs → mostra preferenze\n"
-        "/it o /en <tema> → genera post",
+        "/prefs\n"
+        "/evolve\n"
+        "/memory\n"
+        "/it <tema> o /en <tema>\n\n"
+        "Dopo ogni generazione puoi usare i bottoni 👍 👎 💾",
         parse_mode="Markdown"
     )
 
@@ -371,55 +376,32 @@ async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usa: /learn <testo>")
         return
     total = save_style_sample(text)
-    await update.message.reply_text(f"🧠 Stile appreso. Totale esempi: {total}")
-
-async def buono_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        return
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("Usa: /buono <testo da rinforzare>")
-        return
-    ok = apply_feedback(text, is_good=True)
-    await update.message.reply_text("✅ Rinforzato." if ok else "⚠️ Non ho trovato un match abbastanza vicino.")
-
-async def scarta_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        return
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("Usa: /scarta <testo da penalizzare>")
-        return
-    ok = apply_feedback(text, is_good=False)
-    await update.message.reply_text("🗑️ Penalizzato." if ok else "⚠️ Non ho trovato un match abbastanza vicino.")
+    await update.message.reply_text(f"🧠 Stile appreso. Totale: {total}")
 
 async def preferenza_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Usa: /preferenza <chiave> <valore>\nEsempio: /preferenza tone più cinico e diretto")
+        await update.message.reply_text("Usa: /preferenza <chiave> <valore>")
         return
     key = context.args[0]
     value = " ".join(context.args[1:])
     set_preference(key, value)
-    await update.message.reply_text(f"⚙️ Preferenza aggiornata:\n`{key}` → {value}", parse_mode="Markdown")
+    await update.message.reply_text(f"⚙️ `{key}` → {value}", parse_mode="Markdown")
 
 async def prefs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     prefs = get_all_preferences()
     text = "\n".join([f"• *{k}*: {v}" for k, v in prefs.items()])
-    await update.message.reply_text(f"*Preferenze attuali:*\n\n{text}", parse_mode="Markdown")
+    await update.message.reply_text(f"*Preferenze:*\n\n{text}", parse_mode="Markdown")
 
 async def evolve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
-    await update.message.reply_text("🧬 Sto facendo evolvere il system prompt...")
-    success = evolve_system_prompt()
-    if success:
-        await update.message.reply_text("✅ System prompt evoluto.")
-    else:
-        await update.message.reply_text("❌ Evoluzione fallita.")
+    await update.message.reply_text("🧬 Evoluzione in corso...")
+    ok = evolve_system_prompt()
+    await update.message.reply_text("✅ System prompt evoluto." if ok else "❌ Fallito.")
 
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -434,8 +416,10 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not topic:
         await update.message.reply_text("Usa: /it <tema>")
         return
-    result = generate_ai_drafts(topic)
-    await update.message.reply_text(result)
+    await update.message.reply_text("⏳ Genero...")
+    text, draft_ids = generate_ai_drafts(topic)
+    keyboard = build_feedback_keyboard(draft_ids)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -444,8 +428,10 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not topic:
         await update.message.reply_text("Usa: /en <tema>")
         return
-    result = generate_ai_drafts(topic)
-    await update.message.reply_text(result)
+    await update.message.reply_text("⏳ Generating...")
+    text, draft_ids = generate_ai_drafts(topic)
+    keyboard = build_feedback_keyboard(draft_ids)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -456,8 +442,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = load_conversation(user_id)
 
     if "genera i post" in text.lower():
-        result = generate_ai_drafts(history[-400:] if history else "Tema libero")
-        await update.message.reply_text(result)
+        await update.message.reply_text("⏳ Genero...")
+        result, draft_ids = generate_ai_drafts(history[-400:] if history else "Tema libero")
+        keyboard = build_feedback_keyboard(draft_ids)
+        await update.message.reply_text(result, reply_markup=keyboard, parse_mode="Markdown")
         return
 
     system = get_system_prompt()
@@ -468,7 +456,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Preferenze:
 {json.dumps(prefs, ensure_ascii=False)}
 
-Storico recente:
+Storico:
 {history[-1500:]}
 
 BJ: {text}
@@ -483,6 +471,51 @@ Rispondi in modo naturale e tagliente (max 2-3 frasi)."""
         await update.message.reply_text(reply)
     except Exception as e:
         await update.message.reply_text(f"Errore: {e}")
+
+# ====================== CALLBACK FEEDBACK ======================
+async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(query.from_user.id):
+        return
+
+    data = query.data
+    action, draft_id_str = data.split(":")
+    draft_id = int(draft_id_str)
+
+    text = get_generated_draft(draft_id)
+    if not text:
+        await query.edit_message_text("Draft non più disponibile.")
+        return
+
+    if action == "up":
+        # Cerca se esiste già in style_memory, altrimenti lo crea con score alto
+        conn = sqlite3.connect(DB_NAME)
+        row = conn.execute("SELECT id FROM style_memory WHERE sample_text = ?", (text,)).fetchone()
+        if row:
+            update_style_score(row[0], +0.4)
+        else:
+            save_style_sample(text, initial_score=1.4, source="generated_up")
+        conn.close()
+        await query.answer("👍 Rinforzato")
+        await query.edit_message_reply_markup(reply_markup=None)
+
+    elif action == "down":
+        conn = sqlite3.connect(DB_NAME)
+        row = conn.execute("SELECT id FROM style_memory WHERE sample_text = ?", (text,)).fetchone()
+        if row:
+            update_style_score(row[0], -0.5)
+        else:
+            save_style_sample(text, initial_score=0.4, source="generated_down")
+        conn.close()
+        await query.answer("👎 Penalizzato")
+        await query.edit_message_reply_markup(reply_markup=None)
+
+    elif action == "save":
+        save_style_sample(text, initial_score=1.6, source="saved")
+        await query.answer("💾 Salvato come esempio di stile")
+        await query.edit_message_reply_markup(reply_markup=None)
 
 # ====================== FLASK + BOT ======================
 app = Flask(__name__)
@@ -503,25 +536,24 @@ async def run_bot():
 
     bot.add_handler(CommandHandler("start", start_cmd))
     bot.add_handler(CommandHandler("learn", learn_cmd))
-    bot.add_handler(CommandHandler("buono", buono_cmd))
-    bot.add_handler(CommandHandler("scarta", scarta_cmd))
     bot.add_handler(CommandHandler("preferenza", preferenza_cmd))
     bot.add_handler(CommandHandler("prefs", prefs_cmd))
     bot.add_handler(CommandHandler("evolve", evolve_cmd))
     bot.add_handler(CommandHandler("memory", memory_cmd))
     bot.add_handler(CommandHandler("it", it_cmd))
     bot.add_handler(CommandHandler("en", en_cmd))
+    bot.add_handler(CallbackQueryHandler(feedback_callback))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = BackgroundScheduler()
     loop = asyncio.get_event_loop()
-    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(scan_and_notify_feeds(bot), loop), "interval", minutes=45)
+    scheduler.add_job(lambda: None, "interval", minutes=45)  # placeholder
     scheduler.start()
 
     await bot.initialize()
     await bot.start()
     await bot.updater.start_polling()
-    logger.info("BJ Agent v2 Evolutivo avviato")
+    logger.info("BJ Agent v2.1 Evolutivo avviato")
 
     while True:
         await asyncio.sleep(3600)
