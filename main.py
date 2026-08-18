@@ -68,12 +68,12 @@ async def scan_and_notify_feeds(bot_application):
     return total_added
 
 async def evaluate_and_poke_user(bot_application, new_items):
-    joined_news = "\n---\n".join(new_items[:6])
-    prompt = f"""Sei un editor molto esigente per BJ. Analizza queste notizie e scegli solo quelle forti sul Human Edge. Se nessuna è forte rispondi SKIP.\n{joined_news}"""
+    joined_news = "\\n---\\n".join(new_items[:6])
+    prompt = f"""Sei un editor molto esigente per BJ. Analizza queste notizie e scegli solo quelle forti sul Human Edge. Se nessuna è forte rispondi SKIP.\\n{joined_news}"""
     try:
         text = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text.strip()
         if "skip" not in text.lower() and len(text) > 15:
-            await bot_application.bot.send_message(chat_id=ALLOWED_USER_ID_RAW, text="🚨 Phoenix Alert\n\n" + text, parse_mode="Markdown")
+            await bot_application.bot.send_message(chat_id=ALLOWED_USER_ID_RAW, text="🚨 Phoenix Alert\\n\\n" + text, parse_mode="Markdown")
     except: pass
 
 def save_style_sample(text):
@@ -88,11 +88,11 @@ def save_style_sample(text):
 def get_style_samples(topic=None):
     conn = sqlite3.connect(DB_NAME)
     if topic and len(topic) > 3:
-        rows = conn.execute("SELECT sample_text FROM style_memory WHERE LOWER(sample_text) LIKE ? ORDER BY RANDOM() LIMIT 8", (f"%{topic.lower()}%",)).fetchall()
+rows = conn.execute("SELECT sample_text FROM style_memory WHERE LOWER(sample_text) LIKE ? ORDER BY RANDOM() LIMIT 8", (f"%{topic.lower()}%",)).fetchall()
     else:
-rows = conn.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7").fetchall()
+        rows = conn.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7").fetchall()
     conn.close()
-    return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in rows]) if rows else "Nessun esempio"
+    return "\\n---\\n".join([f"Post Reale di BJ:\\n{r[0]}" for r in rows]) if rows else "Nessun esempio"
 
 def save_conversation(user_id, history):
     conn = sqlite3.connect(DB_NAME)
@@ -108,7 +108,7 @@ def load_conversation(user_id):
 
 def generate_ai_drafts(topic, lang="both"):
     style = get_style_samples(topic)
-    prompt = f"""Sei il Ghostwriter di BJ. Tono naturale e tagliente. Human Edge.\nMEMORIA:\n{style}\n\nTEMA: {topic}\n\nGenera 3 opzioni."""
+    prompt = f"""Sei il Ghostwriter di BJ. Tono naturale e tagliente. Human Edge.\\nMEMORIA:\\n{style}\\n\\nTEMA: {topic}\\n\\nGenera 3 opzioni."""
     try:
         return genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text
     except Exception as e:
@@ -186,10 +186,10 @@ async def handle_message(update, context):
         save_conversation(update.effective_user.id, "")
         return
 
-    prompt = f"""Sei il ghostwriter di BJ. Rispondi in modo naturale e tagliente (max 2-3 frasi).\nStorico: {history}\nBJ: {text}"""
+prompt = f"""Sei il ghostwriter di BJ. Rispondi in modo naturale e tagliente (max 2-3 frasi).\\nStorico: {history}\\nBJ: {text}"""
     try:
         reply = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text.strip()
-save_conversation(update.effective_user.id, (history + f"\nBJ: {text}\nAI: {reply}")[-3000:])
+        save_conversation(update.effective_user.id, (history + f"\\nBJ: {text}\\nAI: {reply}")[-3000:])
         await update.message.reply_text(reply)
     except Exception as e:
         await update.message.reply_text(str(e))
