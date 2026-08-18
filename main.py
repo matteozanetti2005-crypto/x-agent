@@ -81,7 +81,7 @@ def save_style_sample(text):
     conn = sqlite3.connect(DB_NAME)
     conn.execute("INSERT INTO style_memory VALUES (NULL,?,?)", (text.strip(), time.strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
-count = conn.execute("SELECT COUNT(*) FROM style_memory").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM style_memory").fetchone()[0]
     conn.close()
     return count
 
@@ -90,7 +90,7 @@ def get_style_samples(topic=None):
     if topic and len(topic) > 3:
         rows = conn.execute("SELECT sample_text FROM style_memory WHERE LOWER(sample_text) LIKE ? ORDER BY RANDOM() LIMIT 8", (f"%{topic.lower()}%",)).fetchall()
     else:
-        rows = conn.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7").fetchall()
+rows = conn.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7").fetchall()
     conn.close()
     return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in rows]) if rows else "Nessun esempio"
 
@@ -181,7 +181,7 @@ async def handle_message(update, context):
     history = load_conversation(update.effective_user.id)
 
     if "genera i post" in text.lower():
-result = generate_ai_drafts(history or "Tema libero", "both")
+        result = generate_ai_drafts(history or "Tema libero", "both")
         await update.message.reply_text(result)
         save_conversation(update.effective_user.id, "")
         return
@@ -189,7 +189,7 @@ result = generate_ai_drafts(history or "Tema libero", "both")
     prompt = f"""Sei il ghostwriter di BJ. Rispondi in modo naturale e tagliente (max 2-3 frasi).\nStorico: {history}\nBJ: {text}"""
     try:
         reply = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text.strip()
-        save_conversation(update.effective_user.id, (history + f"\nBJ: {text}\nAI: {reply}")[-3000:])
+save_conversation(update.effective_user.id, (history + f"\nBJ: {text}\nAI: {reply}")[-3000:])
         await update.message.reply_text(reply)
     except Exception as e:
         await update.message.reply_text(str(e))
