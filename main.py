@@ -80,7 +80,6 @@ def init_db():
         )
     ''')
 
-    # Tabella temporanea per i draft generati (per feedback)
     c.execute('''
         CREATE TABLE IF NOT EXISTS generated_drafts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,14 +194,16 @@ def get_best_style_samples(topic: str = None, limit: int = 6) -> str:
 
     conn = sqlite3.connect(DB_NAME)
     for r in rows:
-        conn.execute("UPDATE style_memory SET times_used = times_used + 1, last_used = ? WHERE id = ?",
-                     (time.strftime("%Y-%m-%d %H:%M:%S"), r[0]))
+        conn.execute(
+            "UPDATE style_memory SET times_used = times_used + 1, last_used = ? WHERE id = ?",
+            (time.strftime("%Y-%m-%d %H:%M:%S"), r[0])
+        )
     conn.commit()
     conn.close()
 
     return "\n---\n".join([f"[Score {r[2]:.1f}] {r[1]}" for r in rows])
 
-# ====================== GENERATED DRAFTS (per feedback) ======================
+# ====================== GENERATED DRAFTS ======================
 def save_generated_draft(text: str) -> int:
     conn = sqlite3.connect(DB_NAME)
     cur = conn.execute(
@@ -214,7 +215,7 @@ def save_generated_draft(text: str) -> int:
     conn.close()
     return draft_id
 
-def get_generated_draft(draft_id: int) -> str | None:
+def get_generated_draft(draft_id: int):
     conn = sqlite3.connect(DB_NAME)
     row = conn.execute("SELECT text FROM generated_drafts WHERE id = ?", (draft_id,)).fetchone()
     conn.close()
@@ -236,14 +237,14 @@ def update_system_prompt(new_prompt: str):
     conn.commit()
     conn.close()
 
-def evolve_system_prompt():
+def evolve_system_prompt() -> bool:
     prefs = get_all_preferences()
     best_samples = get_best_style_samples(limit=5)
 
     prompt = f"""Sei un meta-agente che migliora il system prompt di un ghostwriter.
 Analizza le preferenze e gli esempi di stile migliori.
 Riscrivi un system prompt più preciso e fedele allo stile di BJ.
-Rispondi SOLO con il nuovo system prompt.
+Rispondi SOLO con il nuovo system prompt, nient'altro.
 
 Preferenze:
 {json.dumps(prefs, indent=2, ensure_ascii=False)}
@@ -258,8 +259,26 @@ Esempi migliori:
             update_system_prompt(new_prompt)
             return True
     except Exception as e:
-        logger.error(f"Errore evolve: {e}")
+        logger.error(f"Errore evolve_system_prompt: {e}")
     return False
+
+async def auto_evolve_job(bot_application=None):
+    """Evoluzione automatica ogni 24 ore"""
+    logger.info("🧬 Avvio evoluzione automatica del system prompt...")
+    success = evolve_system_prompt()
+    if success:
+        logger.info("✅ System prompt evoluto automaticamente")
+        if ALLOWED_USER_ID_RAW and bot_application:
+            try:
+                await bot_application.bot.send_message(
+                    chat_id=ALLOWED_USER_ID_RAW,
+                    text="🧬 *System prompt evoluto automaticamente*",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.warning(f"Non riesco a notificarti: {e}")
+    else:
+        logger.warning("❌ Evoluzione automatica fallita")
 
 # ====================== CONVERSATION ======================
 def save_conversation(user_id, history: str):
@@ -277,9 +296,8 @@ def load_conversation(user_id) -> str:
     conn.close()
     return row[0] if row else ""
 
-# ====================== GENERAZIONE CON FEEDBACK ======================
-def generate_ai_drafts(topic: str) -> tuple[str, list]:
-    """Ritorna (testo formattato, lista di draft_id)"""
+# ====================== GENERAZIONE ======================
+def generate_ai_drafts(topic: str):
     style = get_best_style_samples(topic)
     prefs = get_all_preferences()
     system = get_system_prompt()
@@ -307,7 +325,6 @@ Formato obbligatorio:
     except Exception as e:
         return f"Errore generazione: {e}", []
 
-    # Parsing grezzo delle 3 opzioni
     lines = [l.strip() for l in raw.split("\n") if l.strip()]
     options = []
     current = []
@@ -356,15 +373,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 *BJ Agent v2.1 Evolutivo*\n\n"
-        "Comandi:\n"
-        "/learn <testo>\n"
-        "/buono /scarta (ancora disponibili)\n"
-        "/preferenza <chiave> <valore>\n"
-        "/prefs\n"
-        "/evolve\n"
-        "/memory\n"
-        "/it <tema> o /en <tema>\n\n"
-        "Dopo ogni generazione puoi usare i bottoni 👍 👎 💾",
+        "• /learn <testo>\n"
+        "• /preferenza <chiave> <valore>\n"
+        "• /prefs\n"
+        "• /evolve (manuale)\n"
+        "• /memory\n"
+        "• /it <tema>  |  /en <tema>\n\n"
+        "Evoluzione automatica attiva ogni 24 ore.\n"
+        "Dopo ogni generazione usa i bottoni 👍 👎 💾",
         parse_mode="Markdown"
     )
 
@@ -472,7 +488,6 @@ Rispondi in modo naturale e tagliente (max 2-3 frasi)."""
     except Exception as e:
         await update.message.reply_text(f"Errore: {e}")
 
-# ====================== CALLBACK FEEDBACK ======================
 async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -490,7 +505,6 @@ async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "up":
-        # Cerca se esiste già in style_memory, altrimenti lo crea con score alto
         conn = sqlite3.connect(DB_NAME)
         row = conn.execute("SELECT id FROM style_memory WHERE sample_text = ?", (text,)).fetchone()
         if row:
@@ -545,10 +559,23 @@ async def run_bot():
     bot.add_handler(CallbackQueryHandler(feedback_callback))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # ========== SCHEDULER ==========
     scheduler = BackgroundScheduler()
     loop = asyncio.get_event_loop()
-    scheduler.add_job(lambda: None, "interval", minutes=45)  # placeholder
+
+    def scheduled_evolve():
+        asyncio.run_coroutine_threadsafe(auto_evolve_job(bot), loop)
+
+    scheduler.add_job(
+        scheduled_evolve,
+        trigger="interval",
+        hours=24,
+        id="auto_evolve",
+        replace_existing=True
+    )
+
     scheduler.start()
+    logger.info("Scheduler avviato → evoluzione automatica ogni 24 ore")
 
     await bot.initialize()
     await bot.start()
