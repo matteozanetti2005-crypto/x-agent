@@ -71,9 +71,9 @@ RSS_FEEDS = [
 def get_model():
     """Prova i modelli Gemini disponibili in ordine di preferenza"""
     candidates = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-latest",
+        "gemini-3.6-flash",
         "gemini-2.5-flash",
+        "gemini-1.5-flash-latest",
         "gemini-1.5-pro-latest"
     ]
     for model_name in candidates:
