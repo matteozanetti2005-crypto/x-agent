@@ -13,11 +13,9 @@ import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Variabili d'ambiente
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_USER_ID_RAW = os.getenv("ALLOWED_TELEGRAM_USER_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -26,7 +24,6 @@ PORT = int(os.getenv("PORT", 8080))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Database
 DB_NAME = "agent_vault.db"
 
 def init_db():
@@ -47,19 +44,24 @@ def init_db():
             added_at TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS conversation_memory (
+            user_id TEXT PRIMARY KEY,
+            history TEXT,
+            updated_at TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# Feed RSS (Aggiornato con il tuo feed personalizzato RSS.app e fonti pulite)
 RSS_FEEDS = [
     {"source": "Feed Personalizzato BJ", "url": "https://rss.app/feeds/t5ooMu9TaY8RO77f.xml"},
     {"source": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
     {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"}
 ]
 
-# Funzione di scansione e notifica proattiva
 async def scan_and_notify_feeds(bot_application):
     logger.info("Avvio scansione feed RSS (Proattiva)...")
     total_added = 0
@@ -101,26 +103,31 @@ async def scan_and_notify_feeds(bot_application):
     return total_added
 
 async def evaluate_and_poke_user(bot_application, new_items):
-    joined_news = "\n---\n".join(new_items[:5])
-    style_context = get_style_samples()
-
+    joined_news = "\n---\n".join(new_items[:6])
+    
     prompt = f"""
-Analizza queste nuove notizie appena catturate dai feed:
+Sei un editor molto esigente per BJ (@BJ_Beyond), specializzato in "Human Edge", arte e intelligenza artificiale.
+
+Analizza queste notizie:
 {joined_news}
 
-Sei il ghostwriter e stratega di BJ (@BJ_Beyond). Scegli la notizia più rilevante che tocca il "Human Edge", l'arte o l'innovazione tecnologica. 
-Se c'è una notizia davvero stimolante, scrivi un breve messaggio proattivo (massimo 3 frasi) in cui mi avvisi della scoperta e abbozza un'idea di post tagliente in stile BJ.
-Se nessuna notizia è abbastanza forte, rispondi ESATTAMENTE con la parola: SKIP.
+Regole severe:
+- Seleziona SOLO se la notizia ha un forte legame con il valore umano, la creatività, l'intenzione o l'arte nell'era dell'AI.
+- Se la notizia è debole, generica o poco originale → rispondi ESATTAMENTE con: SKIP
+- Se è forte, scrivi un alert breve (max 3 frasi) + un'idea di post tagliente in stile BJ.
+
+Rispondi solo con SKIP o con il testo dell'alert.
 """
+
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
         text_out = response.text.strip()
         
-        if "skip" not in text_out.lower() and len(text_out) > 10:
+        if "skip" not in text_out.lower() and len(text_out) > 15:
             await bot_application.bot.send_message(
                 chat_id=ALLOWED_USER_ID_RAW,
-                text=f"🚨 **Phoenix Alert (Proattivo)**\n\n{text_out}",
+                text="🚨 **Phoenix Alert**\\n\\n" + text_out,
                 parse_mode="Markdown"
             )
     except Exception as e:
@@ -156,15 +163,45 @@ def save_bulk_samples(posts_list: list) -> int:
     conn.close()
     return added
 
-def get_style_samples() -> str:
+def get_style_samples(topic: str = None) -> str:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 6")
-    rows = cursor.fetchall()
+
+    if topic and len(topic) > 3:
+        search_term = f"%{topic.lower()}%"
+        cursor.execute("""
+            SELECT sample_text FROM style_memory 
+            WHERE LOWER(sample_text) LIKE ? 
+            ORDER BY RANDOM() 
+            LIMIT 8
+        """, (search_term,))
+        rows = cursor.fetchall()
+
+        if len(rows) < 4:
+            cursor.execute("""
+                SELECT sample_text FROM style_memory 
+                ORDER BY RANDOM() 
+                LIMIT 6
+            """)
+            extra = cursor.fetchall()
+            rows = rows + extra
+    else:
+        cursor.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7")
+        rows = cursor.fetchall()
+
     conn.close()
+
     if not rows:
         return "Nessun esempio memorizzato."
-    return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in rows])
+
+    seen = set()
+    unique_rows = []
+    for r in rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            unique_rows.append(r)
+
+    return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in unique_rows[:7]])
 
 def clear_all_memory() -> None:
     conn = sqlite3.connect(DB_NAME)
@@ -172,6 +209,25 @@ def clear_all_memory() -> None:
     cursor.execute("DELETE FROM style_memory")
     conn.commit()
     conn.close()
+
+def save_conversation(user_id: str, history: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        INSERT OR REPLACE INTO conversation_memory (user_id, history, updated_at)
+        VALUES (?, ?, ?)
+    """, (str(user_id), history, now))
+    conn.commit()
+    conn.close()
+
+def load_conversation(user_id: str) -> str:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT history FROM conversation_memory WHERE user_id = ?", (str(user_id),))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ""
 
 def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn = sqlite3.connect(DB_NAME)
@@ -181,7 +237,7 @@ def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn.close()
 
     context_text = "\n---\n".join([f"Fonte [{r[0]}]: {r[1]}" for r in rows]) if rows else "Nessun dato di contesto recente."
-    style_context = get_style_samples()
+    style_context = get_style_samples(topic=prompt_topic)
 
     if lang_mode == "it":
         output_instruction = """
@@ -215,13 +271,19 @@ Genera 3 opzioni per X fornendo per ciascuna SIA la versione ITALIANA che la tra
 """
 
     full_prompt = f"""
-Sei il Ghostwriter e Stratega personale di BJ (@BJ_Beyond), studioso di intelligenza artificiale, autore e appassionato d'arte contemporanea.
-Scrivi post per X (Twitter) rispecchiando esattamente il suo tono di voce: autorevole, tagliente, sintetico e focalizzato sul "Human Edge" (il valore insostituibile dell'anima, dell'intenzione e della creatività umana nell'era dell'automazione).
+Sei il Ghostwriter e Stratega personale di BJ (@BJ_Beyond).
 
-I pilastri della comunicazione di BJ:
-1. Human Edge: l'AI amplifica ma non sostituisce l'anima, l'intuizione e il tocco umano.
-2. Arte e Creatività: rispetto per il processo autentico e la visione estetica.
-3. Approccio 'Building in public': trasparenza, sperimentazione pratica, no fuffa.
+TONO DI VOCE OBBLIGATORIO:
+- Naturale, tagliente, sintetico
+- Autorevole ma mai pomposo
+- Focalizzato sul "Human Edge": l'AI amplifica, ma non sostituisce mai l'intuizione, la sensibilità e l'intenzione umana
+- Evita elenchi, em-dash, frasi fatte e tono generico
+- Preferisci ritmo fluido e osservazioni dirette
+
+PILASTRI DA RISPETTARE:
+1. Human Edge → l'essere umano rimane insostituibile nell'arte, nella strategia e nella creatività
+2. Arte & Processo → rispetto per il lavoro autentico e la visione estetica
+3. Building in public → trasparenza, sperimentazione reale, zero fuffa
 
 MEMORIA DI STILE AUTENTICA DI BJ:
 {style_context}
@@ -273,12 +335,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 **BJ X Agent (Proattivo & Brainstorm) è Online!**\n\n"
-        "• `/scan` : Scansiona i feed manualmente\n"
-        "• `/learn <testo>` : Memorizza un singolo post\n"
-        "• `/memory` : Mostra esempi salvati\n"
-        "• `/clear_memory` : Cancella l'archivio stile\n"
-        "• **Invia un file `.txt` o `.csv`** per caricare l'archivio dei tuoi post!\n\n"
-        "💡 **Uso:** Chiacchieriamo e facciamo brainstorming. Scrivi **'Genera i post'** per avere le bozze bilingue.",
+        "• /scan : Scansiona i feed manualmente\n"
+        "• /learn <testo> : Memorizza un singolo post\n"
+        "• /memory : Mostra esempi salvati\n"
+        "• /clear_memory : Cancella l'archivio stile\n"
+        "• Invia un file `.txt` o `.csv` per caricare l'archivio dei tuoi post!\n\n"
+        "💡 Uso: Chiacchieriamo e facciamo brainstorming. Scrivi 'Genera i post' per avere le bozze bilingue.",
         parse_mode="Markdown"
     )
 
@@ -286,7 +348,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
-    await update.message.reply_text("🔄 Scansione in corso...")
+await update.message.reply_text("🔄 Scansione in corso...")
     added = scan_feeds_manual()
     await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi: {added}")
 
@@ -326,7 +388,7 @@ async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Invia un testo da memorizzare.", parse_mode="Markdown")
         return
     total = save_style_sample(sample_text)
-    await update.message.reply_text(f"🧠 **Stile Appreso!** Post memorizzati: {total}", parse_mode="Markdown")
+    await update.message.reply_text(f"🧠 Stile Appreso! Post memorizzati: {total}", parse_mode="Markdown")
 
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -350,7 +412,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = doc.file_name.lower()
     
     if not (file_name.endswith('.txt') or file_name.endswith('.csv')):
-        await update.message.reply_text("⚠️ Invia un file in formato `.txt` o `.csv`.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Invia un file in formato .txt o .csv.", parse_mode="Markdown")
         return
     
     await update.message.reply_text("📥 Ricezione e analisi archivio in corso...")
@@ -371,7 +433,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             posts = content_str.split("\n\n")
             
     added = save_bulk_samples(posts)
-    await update.message.reply_text(f"🚀 **Archivio Appreso con Successo!** Memorizzati **{added} post**.", parse_mode="Markdown")
+    await update.message.reply_text(f"🚀 Archivio Appreso con Successo! Memorizzati {added} post.", parse_mode="Markdown")
 
 async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -384,8 +446,7 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Elaboro bozze in Italiano...")
     result = generate_ai_drafts(user_topic, lang_mode="it")
     await update.message.reply_text(result)
-
-async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
@@ -397,8 +458,6 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = generate_ai_drafts(user_topic, lang_mode="en")
     await update.message.reply_text(result)
 
-user_conversations = {}
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -406,17 +465,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     user_text = update.message.text
     
+    history = load_conversation(user_id)
+    
     if "genera i post" in user_text.lower() or "genera post" in user_text.lower():
         await update.message.reply_text("🚀 Assemblo le bozze bilingue definitive...")
-        chat_context = user_conversations.get(user_id, "Nessuna conversazione precedente. Tema libero.")
+        chat_context = history if history else "Nessuna conversazione precedente. Tema libero."
         tema_esteso = f"Basati su questa conversazione di brainstorming:\n{chat_context}"
         
         result = generate_ai_drafts(tema_esteso, lang_mode="both")
         await update.message.reply_text(result)
-        user_conversations[user_id] = ""
+        save_conversation(user_id, "")
         return
 
-    history = user_conversations.get(user_id, "")
     brainstorm_prompt = f"""
     Sei il ghostwriter e stratega di BJ (@BJ_Beyond). 
     Siamo in fase di BRAINSTORMING. Rispondi alle mie idee, dammi spunti sul "Human Edge", AI o arte.
@@ -427,7 +487,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     {history}
     
     BJ ti dice: "{user_text}"
-    """
+"""
     
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -449,7 +509,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         new_history = history + f"\nBJ: {user_text}\nAI: {reply}\n"
-        user_conversations[user_id] = new_history[-2000:]
+        save_conversation(user_id, new_history[-3000:])
         await update.message.reply_text(reply)
     except Exception as e:
         await update.message.reply_text(f"⚠️ Errore critico: {e}")
@@ -476,7 +536,6 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Scheduler collegato al bot per la proattività
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         lambda: asyncio.run_coroutine_threadsafe(scan_and_notify_feeds(bot_app), asyncio.get_event_loop()),
@@ -494,7 +553,7 @@ async def run_bot():
         await asyncio.sleep(3600)
 
 def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     try:
