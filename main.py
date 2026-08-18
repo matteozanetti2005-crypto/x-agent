@@ -237,7 +237,7 @@ def generate_ai_drafts(prompt_topic: str, lang_mode: str = "both") -> str:
     conn.close()
 
     context_text = "\n---\n".join([f"Fonte [{r[0]}]: {r[1]}" for r in rows]) if rows else "Nessun dato di contesto recente."
-    style_context = get_style_samples(topic=prompt_topic)
+style_context = get_style_samples(topic=prompt_topic)
 
     if lang_mode == "it":
         output_instruction = """
@@ -339,7 +339,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /learn <testo> : Memorizza un singolo post\n"
         "• /memory : Mostra esempi salvati\n"
         "• /clear_memory : Cancella l'archivio stile\n"
-        "• Invia un file `.txt` o `.csv` per caricare l'archivio dei tuoi post!\n\n"
+        "• Invia un file .txt o .csv per caricare l'archivio dei tuoi post!\n\n"
         "💡 Uso: Chiacchieriamo e facciamo brainstorming. Scrivi 'Genera i post' per avere le bozze bilingue.",
         parse_mode="Markdown"
     )
@@ -351,6 +351,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Scansione in corso...")
     added = scan_feeds_manual()
     await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi: {added}")
+
 def scan_feeds_manual():
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
@@ -443,9 +444,8 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Specifica un tema.", parse_mode="Markdown")
         return
     await update.message.reply_text("🧠 Elaboro bozze in Italiano...")
-    result = generate_ai_drafts(user_topic, lang_mode="it")
+result = generate_ai_drafts(user_topic, lang_mode="it")
     await update.message.reply_text(result)
-
 
 async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -458,43 +458,62 @@ async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Elaboro bozze in Inglese...")
     result = generate_ai_drafts(user_topic, lang_mode="en")
     await update.message.reply_text(result)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
         return
         
     user_text = update.message.text
-    history = load_conversation(update.effective_user.id)
     
-    if "genera i post" in user_text.lower():
+    history = load_conversation(user_id)
+    
+    if "genera i post" in user_text.lower() or "genera post" in user_text.lower():
         await update.message.reply_text("🚀 Assemblo le bozze bilingue definitive...")
-        chat_context = history if history else "Nessuna conversazione precedente."
-        result = generate_ai_drafts(chat_context, lang_mode="both")
+        chat_context = history if history else "Nessuna conversazione precedente. Tema libero."
+        tema_esteso = f"Basati su questa conversazione di brainstorming:\n{chat_context}"
+        
+        result = generate_ai_drafts(tema_esteso, lang_mode="both")
         await update.message.reply_text(result)
-        save_conversation(update.effective_user.id, "")
+        save_conversation(user_id, "")
         return
 
-    # Prompt più pulito e diretto
-    prompt = f"""Sei il ghostwriter e stratega di BJ (@BJ_Beyond).
-Rispondi in modo naturale, tagliente e breve (massimo 2-3 frasi).
-Non fare elenchi, non raffinare, non mandare più versioni.
-
-Storico della conversazione:
-{history}
-
-BJ: "{user_text}"
+    brainstorm_prompt = f"""
+    Sei il ghostwriter e stratega di BJ (@BJ_Beyond). 
+    Siamo in fase di BRAINSTORMING. Rispondi alle mie idee, dammi spunti sul "Human Edge", AI o arte.
+    Rispondi in modo discorsivo, intelligente, tagliente e BREVE (massimo 2-3 frasi).
+    Se l'idea è matura, ricordami che posso scrivere "Genera i post".
+    
+    Storico:
+    {history}
+    
+    BJ ti dice: "{user_text}"
 """
     
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        reply = model.generate_content(prompt).text.strip()
-        
+        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        reply = None
+        last_err = None
+        for mod_name in valid_models:
+            try:
+                model = genai.GenerativeModel(mod_name)
+                response = model.generate_content(brainstorm_prompt)
+                if response and response.text:
+                    reply = response.text
+                    break
+            except Exception as inner_e:
+                last_err = inner_e
+                continue
+                
+        if not reply:
+            await update.message.reply_text(f"⚠️ Errore modello: {last_err}")
+            return
+            
         new_history = history + f"\nBJ: {user_text}\nAI: {reply}\n"
-        save_conversation(update.effective_user.id, new_history[-3000:])
-        
+        save_conversation(user_id, new_history[-3000:])
         await update.message.reply_text(reply)
     except Exception as e:
-        await update.message.reply_text(f"Errore: {e}")
-
+        await update.message.reply_text(f"⚠️ Errore critico: {e}")
 
 # Server Flask per Render
 app = Flask(__name__)
@@ -532,7 +551,7 @@ async def run_bot():
     logger.info("Bot Telegram in ascolto con proattività attiva...")
     
     while True:
-        await asyncio.sleep(3600)
+await asyncio.sleep(3600)
 
 def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -543,6 +562,5 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Chiusura servizio.")
 
-if __name__ == "__main__":
-    main()
-
+   if __name__ == "__main__":
+       main()
