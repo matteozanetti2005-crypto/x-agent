@@ -81,9 +81,140 @@ def save_style_sample(text):
     conn = sqlite3.connect(DB_NAME)
     conn.execute("INSERT INTO style_memory VALUES (NULL,?,?)", (text.strip(), time.strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM style_memory").fetchone()[0]
+count = conn.execute("SELECT COUNT(*) FROM style_memory").fetchone()[0]
     conn.close()
     return count
 
 def get_style_samples(topic=None):
     conn = sqlite3.connect(DB_NAME)
+    if topic and len(topic) > 3:
+        rows = conn.execute("SELECT sample_text FROM style_memory WHERE LOWER(sample_text) LIKE ? ORDER BY RANDOM() LIMIT 8", (f"%{topic.lower()}%",)).fetchall()
+    else:
+        rows = conn.execute("SELECT sample_text FROM style_memory ORDER BY RANDOM() LIMIT 7").fetchall()
+    conn.close()
+    return "\n---\n".join([f"Post Reale di BJ:\n{r[0]}" for r in rows]) if rows else "Nessun esempio"
+
+def save_conversation(user_id, history):
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("INSERT OR REPLACE INTO conversation_memory VALUES (?,?,?)", (str(user_id), history, time.strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def load_conversation(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    row = conn.execute("SELECT history FROM conversation_memory WHERE user_id=?", (str(user_id),)).fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+def generate_ai_drafts(topic, lang="both"):
+    style = get_style_samples(topic)
+    prompt = f"""Sei il Ghostwriter di BJ. Tono naturale e tagliente. Human Edge.\nMEMORIA:\n{style}\n\nTEMA: {topic}\n\nGenera 3 opzioni."""
+    try:
+        return genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text
+    except Exception as e:
+        return f"Errore: {e}"
+
+def is_authorized(uid):
+    return str(uid) == str(ALLOWED_USER_ID_RAW) if ALLOWED_USER_ID_RAW else True
+
+async def start_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    await update.message.reply_text("👋 BJ X Agent online.")
+
+async def scan_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    await update.message.reply_text("🔄 Scansione in corso...")
+    added = scan_feeds_manual()
+    await update.message.reply_text(f"✅ Completata! Nuovi elementi: {added}")
+
+def scan_feeds_manual():
+    total = 0
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    for f in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(f["url"])
+            for entry in feed.entries[:3]:
+                pid = getattr(entry, 'id', getattr(entry, 'link', ''))
+                if pid:
+                    c.execute("INSERT OR IGNORE INTO scraped_posts VALUES (?,?,?,?)", (pid, f["source"], f"{getattr(entry,'title','')}", time.ctime()))
+                    if c.rowcount > 0: total += 1
+        except: continue
+    conn.commit()
+    conn.close()
+    return total
+
+async def learn_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    text = " ".join(context.args)
+    if not text: return
+    total = save_style_sample(text)
+    await update.message.reply_text(f"🧠 Stile appreso! ({total} esempi)")
+
+async def memory_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    await update.message.reply_text(get_style_samples())
+
+async def clear_memory_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    clear_all_memory()
+    await update.message.reply_text("🧹 Memoria azzerata.")
+
+async def handle_document(update, context):
+    if not is_authorized(update.effective_user.id): return
+
+async def it_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    topic = " ".join(context.args)
+    if not topic: return
+    await update.message.reply_text(generate_ai_drafts(topic, "it"))
+
+async def en_cmd(update, context):
+    if not is_authorized(update.effective_user.id): return
+    topic = " ".join(context.args)
+    if not topic: return
+    await update.message.reply_text(generate_ai_drafts(topic, "en"))
+
+async def handle_message(update, context):
+    if not is_authorized(update.effective_user.id): return
+    text = update.message.text
+    history = load_conversation(update.effective_user.id)
+
+    if "genera i post" in text.lower():
+result = generate_ai_drafts(history or "Tema libero", "both")
+        await update.message.reply_text(result)
+        save_conversation(update.effective_user.id, "")
+        return
+
+    prompt = f"""Sei il ghostwriter di BJ. Rispondi in modo naturale e tagliente (max 2-3 frasi).\nStorico: {history}\nBJ: {text}"""
+    try:
+        reply = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt).text.strip()
+        save_conversation(update.effective_user.id, (history + f"\nBJ: {text}\nAI: {reply}")[-3000:])
+        await update.message.reply_text(reply)
+    except Exception as e:
+        await update.message.reply_text(str(e))
+
+app = Flask(__name__)
+@app.route('/')
+def health(): return "OK", 200
+
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+async def run_bot():
+    bot = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(scan_and_notify_feeds(bot), asyncio.get_event_loop()), 'interval', minutes=45)
+    scheduler.start()
+    await bot.initialize()
+    await bot.start()
+    await bot.updater.start_polling()
+    while True: await asyncio.sleep(3600)
+
+def main():
+    threading.Thread(target=run_flask, daemon=True).start()
+    asyncio.run(run_bot())
+
+if __name__ == "__main__":
+    main()
