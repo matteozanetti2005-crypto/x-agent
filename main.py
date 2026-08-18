@@ -555,7 +555,7 @@ async def run_bot():
         await asyncio.sleep(3600)
 
 def main():
-flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     try:
@@ -565,3 +565,4 @@ flask_thread = threading.Thread(target=run_flask, daemon=True)
 
 if __name__ == "__main__":
     main()
+
