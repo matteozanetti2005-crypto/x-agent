@@ -348,10 +348,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
-await update.message.reply_text("🔄 Scansione in corso...")
+    await update.message.reply_text("🔄 Scansione in corso...")
     added = scan_feeds_manual()
     await update.message.reply_text(f"✅ Scansione completata!\nNuovi elementi: {added}")
-
 def scan_feeds_manual():
     total_added = 0
     conn = sqlite3.connect(DB_NAME)
