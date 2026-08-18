@@ -445,7 +445,9 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Elaboro bozze in Italiano...")
     result = generate_ai_drafts(user_topic, lang_mode="it")
     await update.message.reply_text(result)
-    async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
@@ -456,6 +458,7 @@ async def it_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Elaboro bozze in Inglese...")
     result = generate_ai_drafts(user_topic, lang_mode="en")
     await update.message.reply_text(result)
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
