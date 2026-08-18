@@ -67,6 +67,23 @@ RSS_FEEDS = [
     {"source": "MIT Tech Review", "url": "https://technologyreview.com/topic/artificial-intelligence/feed"},
 ]
 
+# ====================== MODEL SELECTOR ======================
+def get_model():
+    """Prova i modelli Gemini disponibili in ordine di preferenza"""
+    candidates = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-2.5-flash",
+        "gemini-1.5-pro-latest"
+    ]
+    for model_name in candidates:
+        try:
+            return genai.GenerativeModel(model_name)
+        except Exception as e:
+            logger.warning(f"Modello {model_name} non disponibile: {e}")
+            continue
+    raise Exception("Nessun modello Gemini disponibile. Controlla la API key e i modelli supportati.")
+
 # ====================== CORE FUNCTIONS ======================
 def is_authorized(uid) -> bool:
     if not ALLOWED_USER_ID_RAW:
@@ -140,7 +157,7 @@ TEMA: {topic}
 
 Genera 3 opzioni di post (brevi, potenti, pronti da pubblicare)."""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = get_model()
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
@@ -213,7 +230,7 @@ Se nessuna è abbastanza forte rispondi solo con la parola SKIP.
 Notizie:
 {joined_news}"""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = get_model()
         text = model.generate_content(prompt).text.strip()
         if "skip" not in text.lower() and len(text) > 20:
             await bot_application.bot.send_message(
@@ -251,7 +268,7 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     samples = get_style_samples()
-    await update.message.reply_text(samples[:4000])  # Telegram limit
+    await update.message.reply_text(samples[:4000])
 
 async def clear_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -300,7 +317,7 @@ Storico conversazione:
 BJ: {text}"""
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = get_model()
         reply = model.generate_content(prompt).text.strip()
         new_history = (history + f"\nBJ: {text}\nAI: {reply}")[-3000:]
         save_conversation(user_id, new_history)
@@ -351,7 +368,6 @@ async def run_bot():
     await bot.updater.start_polling()
     logger.info("Bot avviato correttamente")
 
-    # Keep alive
     while True:
         await asyncio.sleep(3600)
 
